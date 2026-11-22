@@ -4,6 +4,38 @@ from types import SimpleNamespace
 import agent
 
 
+def test_system_prompt_enforces_platform_routing():
+    """回归：用户提到 B站时不能误选抖音工具。"""
+    assert "提到 B站就绝不能调用任何 douyin_ 工具" in agent.SYSTEM
+    assert "B站目前只支持按集下载" in agent.SYSTEM
+    douyin_desc = next(t["function"]["description"] for t in agent.TOOLS
+                       if t["function"]["name"] == "douyin_random")
+    assert "B站" in douyin_desc and "不能用" in douyin_desc
+
+
+def test_forced_platform_detection():
+    assert agent._forced_platform("B站随机下一首") == "bili_"
+    assert agent._forced_platform("哔哩哔哩下载") == "bili_"
+    assert agent._forced_platform("douyin 随机10个") == "douyin_"
+    assert agent._forced_platform("随机下载20个搞笑视频") is None
+
+
+def test_bilibili_request_blocks_douyin_tool(monkeypatch):
+    """即便 LLM 选错工具，B站请求也绝不执行 douyin_random。"""
+    called = []
+    monkeypatch.setitem(agent.FUNCS, "douyin_random",
+                        lambda **kw: called.append(kw) or {"success": True})
+    a, events = _make_agent(monkeypatch, [
+        _completion([_tool_call("douyin_random", '{"count": 1}')]),
+        _completion(),
+    ])
+    a.chat("B站随机下一首")
+    assert called == [], "B站请求错误地执行了抖音工具"
+    results = [data for event, data in events if event == "result"]
+    assert results[0]["success"] is False
+    assert "B站" in results[0]["message"]
+
+
 class _FakeClient:
     def __init__(self, responses):
         self.responses = list(responses)

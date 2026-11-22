@@ -63,7 +63,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "douyin_random",
-            "description": "随机刷抖音下载视频，刷到什么下什么。用户说'随机下载N个''刷到什么下什么'时用。",
+            "description": "只在抖音平台随机刷视频：用户提到抖音/douyin，或完全没指定平台只说'随机刷N个''刷到什么下什么'时用。用户提到B站/哔哩哔哩时绝对不能用本工具。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -133,15 +133,40 @@ _SCHEMA_PARAMS = {
     for t in TOOLS
 }
 
+# 平台关键词 → 该平台允许的工具前缀。用户明确提到平台时硬性约束工具选择，
+# 不依赖 LLM 自觉（曾出现"B站随机下一首"被路由到 douyin_random）。
+_PLATFORM_PREFIXES = (
+    (("b站", "哔哩哔哩", "bilibili"), "bili_"),
+    (("抖音", "douyin"), "douyin_"),
+)
+
+
+def _forced_platform(text):
+    """从用户原话识别明确平台，返回允许的工具前缀；未明确则返回 None。"""
+    low = (text or "").lower()
+    for words, prefix in _PLATFORM_PREFIXES:
+        if any(w in low for w in words):
+            return prefix
+    return None
+
 SYSTEM = """你是视频下载助手。用户用中文告诉你要下载什么，你通过调用工具完成任务。
-规则：
-1. 用户给出 http:// 或 https:// 开头的网页链接（YouTube、B站、抖音、微博等任意网站）→ 一律调 url_download，把完整链接原样传给 url 参数。**绝不能因为链接来自某个平台就调 douyin_random 或 bili_download**；只有用户没给链接、只说"随机刷"时才用 douyin_random。
+最重要的规则：先看用户提到的平台（B站/哔哩哔哩/bilibili 或 抖音/douyin），再选工具。
+平台是硬约束：**提到 B站就绝不能调用任何 douyin_ 工具，提到抖音就绝不能调用任何 bili_ 工具。**
+没有明确平台时才按下面的默认规则处理。
+
+平台识别：
+- 提到 B站/哔哩哔哩/bilibili → 只能用 bili_ 工具（bili_download / bili_status）。B站目前只支持按集下载番剧，不支持随机/音乐/关键词下载；若用户要求"B站随机""B站下一首""B站唱歌"等，直接文字回复"B站目前只支持按集下载番剧，不支持随机或音乐筛选；请告诉我具体集数范围，或发视频链接用链接下载"，不要调用任何工具。
+- 提到抖音/douyin → 只能用 douyin_ 工具（douyin_random / douyin_login）。
+- 两个平台都没提 → 按默认规则（下面第 3、4 条）处理。
+
+默认规则：
+1. 用户给出 http:// 或 https:// 开头的网页链接（YouTube、B站、抖音、微博等任意网站）→ 一律调 url_download，把完整链接原样传给 url 参数。
 2. 用户说下载番剧/集数（没给链接）→ 调 bili_download；集数范围从用户的话里提取。若只说剧名没给范围，先调 bili_status 查总集数再决定，不要臆测数字。
-3. 用户说随机刷/刷到什么下什么（没给链接）→ 调 douyin_random，数量从话里提取
-4. 用户说唱歌/音乐类（没给链接）→ 调 douyin_random 并传 keywords=['唱歌','翻唱','现场','唱']
-5. 用户问当前任务进度/下完没 → 调 get_state；问某部番剧总共下了多少集 → 调 bili_status
-6. 用户说登录 → 调 douyin_login
-7. 用户说清理 → 调 clean_temp
+3. 用户说随机刷/刷到什么下什么（没给链接，且没提 B站）→ 调 douyin_random，数量从话里提取。
+4. 用户说唱歌/音乐类（没给链接，且没提 B站）→ 调 douyin_random 并传 keywords=['唱歌','翻唱','现场','唱']。
+5. 用户问当前任务进度/下完没 → 调 get_state；问某部番剧总共下了多少集 → 调 bili_status。
+6. 用户说登录 → 调 douyin_login；但提到 B站登录时，文字回复"B站请在设置页通用登录里打开 bilibili.com 扫码"，不要调 douyin_login。
+7. 用户说清理 → 调 clean_temp。
 8. 每次只返回一个工具调用，等结果后再决定下一步。任务完成后用简洁中文汇报结果。
 9. 如果工具返回失败（success=false），如实告诉用户原因，不要假装成功。
 """
@@ -173,6 +198,7 @@ class Agent:
             self.emit("msg", "未配置 API key。请到设置页填写智谱 key（glm-4-flash 免费）。")
             return
         self._refresh_client()
+        forced = _forced_platform(user_text)
         messages = [
             {"role": "system", "content": SYSTEM},
             {"role": "user", "content": user_text},
@@ -218,7 +244,11 @@ class Agent:
                     args = None
                 self.emit("tool", {"name": name, "args": args or {}})
                 fn = FUNCS.get(name)
-                if args is None:
+                if forced and not name.startswith(forced):
+                    platform = "B站" if forced == "bili_" else "抖音"
+                    result = {"success": False,
+                              "message": f"用户明确指定{platform}，禁止调用 {name}。请改用{platform}的工具，或文字说明该平台不支持此需求。"}
+                elif args is None:
                     result = {"success": False, "message": "工具参数格式错误，请重新调用"}
                 elif not fn:
                     result = {"success": False, "message": f"未知工具 {name}"}
