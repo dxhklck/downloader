@@ -52,7 +52,19 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force bin | Out-Null
-          Invoke-WebRequest -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile ffmpeg.zip
+          $urls = @(
+            'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip',
+            'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
+          )
+          $ok = $false
+          foreach ($u in $urls) {
+            try {
+              Invoke-WebRequest -Uri $u -OutFile ffmpeg.zip -ErrorAction Stop
+              $ok = $true
+              break
+            } catch { Write-Host "下载失败，尝试备用源: $u" }
+          }
+          if (-not $ok) { throw '所有 ffmpeg 下载源均失败' }
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_tmp -Force
           Copy-Item (Get-ChildItem ffmpeg_tmp -Recurse -Filter ffmpeg.exe  | Select-Object -First 1).FullName bin/ffmpeg.exe
           Copy-Item (Get-ChildItem ffmpeg_tmp -Recurse -Filter ffprobe.exe | Select-Object -First 1).FullName bin/ffprobe.exe
@@ -80,7 +92,7 @@ jobs:
         if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgirepository1.0-dev gir1.2-webkit2gtk-4.1 libcairo2-dev
+          sudo apt-get install -y libgirepository1.0-dev libwebkit2gtk-4.1-dev libcairo2-dev
           pip install pygobject
 
       # ---- PyInstaller 构建（build.py 已跨平台适配） ----
@@ -101,7 +113,7 @@ jobs:
         if: matrix.platform == 'macos'
         run: |
           VER=$(python -c "import build; print(build.APP_VERSION)")
-          hdiutil create -volname "视频下载助手" -srcfolder "dist/视频下载助手.app" -format udzo -o "视频下载助手-${VER}-macos.dmg"
+          hdiutil create -volname "视频下载助手" -srcfolder "dist/视频下载助手.app" -o "视频下载助手-${VER}-macos.dmg"
 
       - name: Make deb (Linux)
         if: matrix.platform == 'linux'
