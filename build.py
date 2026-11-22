@@ -44,6 +44,7 @@ def make_spec():
     datas = [
         (os.path.join(HERE, "web"), "web"),
         (os.path.join(HERE, "core"), "core"),
+        (os.path.join(HERE, "assets"), "assets"),  # 图标：webview.start(icon=...) 用
         (os.path.join(HERE, "bin"), "bin"),  # ffmpeg/ffprobe（可能不存在，跳过）
     ]
     cmd = [

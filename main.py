@@ -175,7 +175,9 @@ def main():
         min_size=(900, 600),
         background_color="#F5F5F5",
     )
-    webview.start(gui="edgechromium", debug=False)
+    icon = os.path.join(config._RES_DIR, "assets", "app.ico")
+    webview.start(gui="edgechromium", debug=False,
+                  icon=icon if os.path.isfile(icon) else None)
 
 
 if __name__ == "__main__":
