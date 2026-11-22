@@ -129,7 +129,7 @@ jobs:
         if: matrix.platform == 'macos'
         run: |
           VER=$(python -c "import build; print(build.APP_VERSION)")
-          hdiutil create -volname "视频下载助手" -srcfolder "dist/视频下载助手.app" -o "视频下载助手-${VER}-macos.dmg"
+          hdiutil create -volname "视频下载助手" -srcfolder "dist/视频下载助手.app" -o "video_download-${VER}-macos.dmg"
 
       - name: Make deb (Linux)
         if: matrix.platform == 'linux'
@@ -156,7 +156,7 @@ jobs:
           EOF
           cp assets/app_256.png "pkg/usr/share/icons/hicolor/256x256/apps/视频下载助手.png"
           cp -r "dist/视频下载助手/." "pkg/opt/视频下载助手/"
-          dpkg-deb --build pkg "视频下载助手-${VER}-linux-amd64.deb"
+          dpkg-deb --build pkg "video_download-${VER}-linux-amd64.deb"
 
       # ---- 收集产物 ----
       - name: Collect artifacts
@@ -189,5 +189,6 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          name: video_download
           files: release/*
           generate_release_notes: true

@@ -11,7 +11,8 @@ import config
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36"
 
 # 任务状态（全局，界面轮询用）
-STATE = {"running": False, "task": "", "done": 0, "total": 0, "logs": [], "log_gen": 0}
+STATE = {"running": False, "task": "", "done": 0, "total": 0, "logs": [],
+         "log_gen": 0, "cancelled": False, "episodes": {}}
 STATE_LOCK = threading.Lock()
 
 # 通用站点登录：后台线程持有浏览器，前端点"完成登录"置 done 标志
@@ -40,8 +41,30 @@ def try_start(task):
     with STATE_LOCK:
         if STATE["running"]:
             return False
-        STATE.update(running=True, task=task, done=0, total=0, logs=[])
+        STATE.update(running=True, task=task, done=0, total=0, logs=[],
+                     cancelled=False, episodes={})
         return True
+
+
+def cancel_task():
+    """请求取消当前任务。任务在下一个检查点安全退出。"""
+    with STATE_LOCK:
+        if not STATE["running"]:
+            return _fail("当前没有运行中的任务")
+        STATE["cancelled"] = True
+    _log("已收到取消请求，将在当前步骤完成后停止")
+    return _ok("已请求取消，任务将在当前步骤完成后停止")
+
+
+def _cancelled():
+    with STATE_LOCK:
+        return STATE["cancelled"]
+
+
+def set_episode(ep, status):
+    """上报单集状态（pending/running/ok/skip/fail），供前端网格展示。"""
+    with STATE_LOCK:
+        STATE["episodes"][str(ep)] = status
 
 
 def finish():
@@ -200,15 +223,23 @@ def bili_download(start, end, out_dir=None, workers=4, ep_path=None):
     _set(total=total)
     _log(f"开始下载 B站 {start}-{end}，共 {total} 集，{workers} 并发")
 
+    for i in range(start, end + 1):
+        set_episode(i, "pending")
+
     def work(i):
+        if _cancelled():
+            set_episode(i, "cancelled")
+            return "cancel"
+        set_episode(i, "running")
         st, info = _bili_one(i, eps, out_dir, sess)
         with STATE_LOCK:
             STATE["done"] += 1
             d = STATE["done"]
+        set_episode(i, "cancel" if st == "cancel" else st)
         _log(f"[{d}/{total}] 第{i}集 {st}")
         return st
 
-    ok = skip = fail = 0
+    ok = skip = fail = cancelled_count = 0
     try:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = {ex.submit(work, i): i for i in range(start, end + 1)}
@@ -216,10 +247,12 @@ def bili_download(start, end, out_dir=None, workers=4, ep_path=None):
                 st = fut.result()
                 if st == "ok": ok += 1
                 elif st == "skip": skip += 1
+                elif st == "cancel": cancelled_count += 1
                 else: fail += 1
     finally:
-        _set(running=False)
-    msg = f"B站下载完成：成功 {ok}，跳过 {skip}，失败 {fail}，输出 {out_dir}"
+        finish()
+    msg = f"B站下载{'已取消' if cancelled_count else '完成'}：成功 {ok}，跳过 {skip}，失败 {fail}" + (
+        f"，取消 {cancelled_count}" if cancelled_count else "") + f"，输出 {out_dir}"
     _log(msg)
     return _ok(msg, ok=ok, skip=skip, fail=fail, out_dir=out_dir)
 
@@ -442,7 +475,7 @@ def douyin_random(count, out_dir=None, keywords=None, min_sec=5, max_sec=360):
                     out.append(a)
                 return out
 
-            while ok < count and attempted < max_attempts:
+            while ok < count and attempted < max_attempts and not _cancelled():
                 attempted += 1
                 cand = usable()
                 if not cand:
@@ -843,6 +876,8 @@ def url_download(url, quality="best"):
     _log(f"开始下载链接：{url[:60]}")
 
     def progress_hook(d):
+        if _cancelled():
+            raise RuntimeError("用户取消下载")
         if d.get("status") == "downloading":
             p = d.get("_percent_str", "").strip()
             if p:
@@ -924,6 +959,8 @@ def url_download(url, quality="best"):
         return _ok(f"已下载：{title[:40]}（{int(dur)}秒）→ {out_dir}{merge_note}",
                    title=title, duration=dur, out_dir=out_dir)
     except Exception as e:
+        if _cancelled():
+            return _ok("下载已取消", cancelled=True)
         return _fail(f"链接下载失败：{str(e)[:150]}")
     finally:
         for k, v in saved.items():  # 恢复被临时清掉的环境代理

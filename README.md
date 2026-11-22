@@ -68,9 +68,9 @@ downloader/
 
 | 平台 | 安装包 | 说明 |
 |---|---|---|
-| Windows | `视频下载助手-x.y.z-setup.exe` | Inno Setup 安装器，桌面快捷方式，可卸载 |
-| macOS | `视频下载助手-x.y.z-macos.dmg` | 拖入 Applications；未签名，首次打开需右键→打开 |
-| Linux | `视频下载助手-x.y.z-linux-amd64.deb` | Debian/Ubuntu 系安装，含桌面入口 |
+| Windows | `video_download-x.y.z-setup.exe` | Inno Setup 安装器，桌面快捷方式，可卸载 |
+| macOS | `video_download-x.y.z-macos.dmg` | 拖入 Applications；未签名，首次打开需右键→打开 |
+| Linux | `video_download-x.y.z-linux-amd64.deb` | Debian/Ubuntu 系安装，含桌面入口 |
 
 产物在仓库 Actions 页的 Artifacts 下载；打 tag 的版本会自动发布到 Releases。安装包内已带 Python 运行时、ffmpeg 和预置模型配置，开箱即用。
 

@@ -163,6 +163,10 @@ class Api:
         """清空运行日志（前端"清空"按钮）。"""
         return tools.clear_logs()
 
+    def cancel_task(self):
+        """请求取消当前下载任务。"""
+        return tools.cancel_task()
+
     def get_paths(self):
         """返回当前数据目录，供设置页展示/确认。"""
         return {"ok": True, "root": config.ROOT, "dir_bili": config.DIR_BILI,

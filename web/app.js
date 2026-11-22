@@ -38,6 +38,44 @@ function scrollChat() {
   log.scrollTop = log.scrollHeight;
 }
 
+// ---- 对话历史持久化（localStorage）----
+const HISTORY_KEY = 'downloader_chat_history';
+const HISTORY_MAX = 200;
+
+function saveHistory() {
+  try {
+    const msgs = Array.from($('chatLog').querySelectorAll('.msg'))
+      .filter((n) => !n.classList.contains('thinking'))
+      .slice(-HISTORY_MAX)
+      .map((n) => ({ html: n.outerHTML }));
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(msgs));
+  } catch (e) { /* 隐私模式或空间不足时静默跳过 */ }
+}
+
+function restoreHistory() {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    if (!raw) return false;
+    const msgs = JSON.parse(raw);
+    if (!Array.isArray(msgs) || !msgs.length) return false;
+    const log = $('chatLog');
+    log.innerHTML = '';
+    msgs.forEach((m) => {
+      const div = document.createElement('div');
+      div.innerHTML = m.html;
+      if (div.firstChild) log.appendChild(div.firstChild);
+    });
+    scrollChat();
+    return true;
+  } catch (e) { return false; }
+}
+
+function clearHistory() {
+  try { localStorage.removeItem(HISTORY_KEY); } catch (e) {}
+  $('chatLog').innerHTML = '';
+  saveHistory();
+}
+
 function addMessage(text, who) {
   const div = document.createElement('div');
   div.className = 'msg msg-' + who;
@@ -47,6 +85,7 @@ function addMessage(text, who) {
     '<div class="msg-body"><div class="msg-text">' + escapeHtml(text) + '</div></div>';
   $('chatLog').appendChild(div);
   scrollChat();
+  saveHistory();
   return div;
 }
 
@@ -59,6 +98,7 @@ function addToolStatus(name, args) {
     '</b> ' + escapeHtml(JSON.stringify(args)) + '</div></div>';
   $('chatLog').appendChild(div);
   scrollChat();
+  saveHistory();
 }
 
 function detailBlock(detail) {
@@ -81,6 +121,7 @@ function addResult(result) {
     (result.success ? '' : detailBlock(result.detail || result.message)) + '</div>';
   $('chatLog').appendChild(div);
   scrollChat();
+  saveHistory();
 }
 
 // 思考中占位：发送后立即插入，收到首个真实回复时移除
@@ -185,6 +226,21 @@ function updateState(s) {
   } else {
     pill.textContent = '就绪'; pill.className = 'pill pill-muted';
   }
+
+  // 每集进度网格 + 取消按钮
+  const eps = s.episodes || {};
+  const keys = Object.keys(eps);
+  const grid = $('episodeGrid');
+  const cancelBtn = $('cancelTaskBtn');
+  if (keys.length) {
+    grid.classList.remove('hidden');
+    const html = keys.map((k) => '<span class="ep ' + escapeHtml(eps[k]) + '" title="第' + escapeHtml(k) + '集：' + escapeHtml(eps[k]) + '">' + escapeHtml(k) + '</span>').join('');
+    if (grid.innerHTML !== html) grid.innerHTML = html;
+  } else {
+    grid.classList.add('hidden');
+    grid.innerHTML = '';
+  }
+  cancelBtn.classList.toggle('hidden', !s.running);
 
   // 日志增量渲染：代际号变化时重置（清空日志后丢弃在途 poll 的旧响应）
   const logs = s.logs || [];
@@ -404,6 +460,14 @@ onReady(async () => {
   initAssetEvents();
   $('assetSearch').addEventListener('input', debouncedSearch);
   $('assetSort').addEventListener('change', renderAssets);
+  restoreHistory();
+  $('clearChatBtn').addEventListener('click', clearHistory);
+  $('cancelTaskBtn').addEventListener('click', async () => {
+    try {
+      const r = await api.cancel_task();
+      $('testResult').textContent = r.message || '';
+    } catch (e) { console.error('cancel failed', e); }
+  });
   $('sendBtn').addEventListener('click', send);
   $('chatInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
   $('settingsBtn').addEventListener('click', openSettings);

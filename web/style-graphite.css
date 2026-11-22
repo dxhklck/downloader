@@ -804,3 +804,14 @@ details.adv-field > summary { cursor: pointer; user-select: none; color: var(--t
 details.adv-field > summary::marker { color: var(--text-muted); }
 details.adv-field > summary:hover { color: var(--text-primary); }
 details.adv-field .field { margin-top: 10px; }
+
+/* 取消任务按钮 */
+.cancel-btn { width: 100%; margin-top: 10px; }
+/* 每集进度网格 */
+.episode-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(38px, 1fr)); gap: 5px; margin-top: 12px; max-height: 180px; overflow-y: auto; }
+.episode-grid .ep { display: flex; align-items: center; justify-content: center; height: 30px; border-radius: 5px; font-size: 11px; background: var(--bg-hover, #eef0f4); color: var(--text-muted); }
+.episode-grid .ep.running { background: #3b82f6; color: #fff; }
+.episode-grid .ep.ok { background: #22c55e; color: #fff; }
+.episode-grid .ep.skip { background: #f59e0b; color: #fff; }
+.episode-grid .ep.fail, .episode-grid .ep.cancel { background: #ef4444; color: #fff; }
+.chat-head .text-btn { margin-left: auto; }
