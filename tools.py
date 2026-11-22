@@ -667,6 +667,23 @@ def site_login(url, timeout=300):
                         break  # 窗口被关闭
                 if not done:
                     return _fail("登录超时（5分钟），请重试")
+                # 确认后不立即导出：等跳转落地、Cookie 写入完成。
+                # 连续 3 次（每次 1 秒）Cookie 数量不变且非空，视为稳定。
+                stable = 0
+                last_count = -1
+                for _ in range(8):
+                    try:
+                        page.wait_for_timeout(1000)
+                    except Exception:
+                        break
+                    cookies = ctx.cookies()
+                    if cookies and len(cookies) == last_count:
+                        stable += 1
+                        if stable >= 3:
+                            break
+                    else:
+                        stable = 0
+                    last_count = len(cookies)
                 cookies = ctx.cookies()
                 total = _merge_cookies_file(_cookies_to_lines(cookies))
                 _log(f"登录成功：已保存 {len(cookies)} 个 Cookie，统一库共 {total} 个")

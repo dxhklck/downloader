@@ -126,6 +126,13 @@ FUNCS = {
     "url_download": tools.url_download,
 }
 
+# 函数名 -> Schema 声明的参数名集合。LLM 只能传这些键，
+# 不能借函数签名里额外的可选参数（如 out_dir/ep_path）越权写路径。
+_SCHEMA_PARAMS = {
+    t["function"]["name"]: set(t["function"]["parameters"].get("properties", {}))
+    for t in TOOLS
+}
+
 SYSTEM = """你是视频下载助手。用户用中文告诉你要下载什么，你通过调用工具完成任务。
 规则：
 1. 用户给出 http:// 或 https:// 开头的网页链接（YouTube、B站、抖音、微博等任意网站）→ 一律调 url_download，把完整链接原样传给 url 参数。**绝不能因为链接来自某个平台就调 douyin_random 或 bili_download**；只有用户没给链接、只说"随机刷"时才用 douyin_random。
@@ -216,8 +223,11 @@ class Agent:
                 elif not fn:
                     result = {"success": False, "message": f"未知工具 {name}"}
                 else:
-                    # 按签名过滤参数，避免多余参数触发 TypeError；工具内部异常统一捕获
-                    accepted = inspect.signature(fn).parameters
+                    # 双重白名单：Schema 未声明的参数一律丢弃（防越权），
+                    # 且函数签名不接受的参数也不传（防 TypeError）。
+                    schema_keys = _SCHEMA_PARAMS.get(name, set())
+                    signature_keys = set(inspect.signature(fn).parameters)
+                    accepted = schema_keys & signature_keys
                     call_args = {k: v for k, v in args.items() if k in accepted}
                     try:
                         result = fn(**call_args)

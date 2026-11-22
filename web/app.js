@@ -223,7 +223,7 @@ async function openSettings() {
     if (k === cfg.provider) opt.selected = true;
     sel.appendChild(opt);
   });
-  $('apiKeyInput').value = cfg.api_key || '';
+  $('apiKeyInput').value = '';  // 后端不回传真实 Key；留空表示不修改
   $('apiKeyInput').placeholder = cfg.configured ? '已配置，留空表示不修改' : '粘贴 API Key';
   $('modelInput').value = cfg.model || '';
   $('proxyInput').value = cfg.proxy || '';

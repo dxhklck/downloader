@@ -164,30 +164,11 @@ def main():
                     "# 或填绝对路径（如 D:\\视频下载），所有视频/cookie/缓存放那里\n")
         print("  已生成 数据目录.txt 模板（留空则用 exe 目录）")
 
-    print("[4/4] 预置 config.json（把本机 key 随包带走，开箱即用）...")
-    import json
-    src_cfg = os.path.join(HERE, "config.json")
-    dst_cfg = os.path.join(bundle, "config.json")
-    if os.path.exists(src_cfg):
-        try:
-            with open(src_cfg, encoding="utf-8") as f:
-                cfg = json.load(f)
-            # 只带运行必需项；root/out_dir 不写死，让目标机器自动探测
-            preset = {
-                "provider": cfg.get("provider", "zhipu"),
-                "api_key": cfg.get("api_key", ""),
-                "model": cfg.get("model", ""),
-            }
-            with open(dst_cfg, "w", encoding="utf-8") as f:
-                json.dump(preset, f, ensure_ascii=False, indent=2)
-            print(f"  已写入 config.json（key 已预置，掩码 {preset['api_key'][:6]}••••{preset['api_key'][-4:]}）")
-        except Exception as e:
-            print(f"  [warn] 预置 config 失败：{e}")
-    else:
-        print("  [warn] 本机无 config.json，产物首次运行需自行填 key")
+    print("[4/4] 不预置 config.json（避免把本机 API Key 打进分发包）...")
+    print("  产物首次运行时请在设置页自行填写 API Key")
 
     print(f"\n[done] 产物：{DIST}")
-    print("  双击 视频下载助手.exe 启动；key 已预置，开箱即用")
+    print("  双击 视频下载助手.exe 启动；首次运行请在设置页填写 API Key")
 
 
 if __name__ == "__main__":

@@ -17,7 +17,8 @@ class Api:
     def __init__(self):
         self.q = queue.Queue()           # 事件队列 -> 界面轮询
         self.agent = Agent(self._emit)
-        self._chat_busy = threading.Lock()  # 串行化对话，防连发导致多 agent 线程并发
+        self._chat_busy = threading.Lock()   # 只串行化对话，防连发导致多 agent 线程并发
+        self._login_busy = threading.Lock()  # 登录独立占用，不再阻塞对话
 
     @staticmethod
     def _err(e):
@@ -78,7 +79,8 @@ class Api:
     def get_config(self):
         cfg = config.load()
         key = cfg.get("api_key", "")
-        cfg["api_key"] = (key[:6] + "••••" + key[-4:]) if len(key) > 12 else ("••••" if key else "")
+        # 不回传真实 Key；前端通过 configured 判断是否已配置，留空即不修改。
+        cfg.pop("api_key", None)
         cfg["providers"] = config.PROVIDERS
         cfg["configured"] = bool(key)
         return cfg
@@ -86,9 +88,8 @@ class Api:
     def save_config(self, cfg_json):
         try:
             cfg = json.loads(cfg_json) if isinstance(cfg_json, str) else cfg_json
-            # 前端回填的是掩码 key，未修改时不覆盖真实 key
-            key = cfg.get("api_key", "")
-            if ("••••" in key) or (key and set(key) <= set("•abcdfgklmnopqrstuvwxyz0123456789") and len(key) < 10):
+            # 前端 api_key 留空即不修改；任何非空值都视为用户显式填写的新 Key。
+            if not str(cfg.get("api_key", "")).strip():
                 cfg.pop("api_key", None)
             config.save(cfg)
             self.agent._refresh_client()
@@ -123,29 +124,33 @@ class Api:
         except Exception as e:
             return self._err(e)
 
-    def _bg_task(self, fn, done_event):
-        """后台执行长任务（登录/下载），避免阻塞桥线程；结束发事件。"""
-        if not self._chat_busy.acquire(blocking=False):
+    def _bg_task(self, fn, done_event, lock=None):
+        """后台执行长任务（登录/下载），避免阻塞桥线程；done 事件必定推送。"""
+        lock = lock or self._chat_busy
+        if not lock.acquire(blocking=False):
             return {"ok": False, "message": "有任务正在进行，请稍候"}
         def run():
             try:
                 r = fn()
-                self._emit(done_event, r)
+            except Exception as e:
+                r = self._err(e)
             finally:
-                self._chat_busy.release()
+                # done 在 finally 中统一推送：即使工具抛异常，前端也能解锁
+                self._emit(done_event, r)
+                lock.release()
         threading.Thread(target=run, daemon=True).start()
         return {"ok": True}
 
     def xhs_login(self):
         """打开小红书窗口扫码登录（后台执行）。"""
-        r = self._bg_task(tools.xhs_login, "xhs_login_done")
+        r = self._bg_task(tools.xhs_login, "xhs_login_done", lock=self._login_busy)
         if r.get("ok"):
             r["message"] = "已打开小红书窗口，请扫码"
         return r
 
     def site_login(self, url):
         """通用站点登录（后台执行）：打开网址，登录后点"完成登录"。"""
-        r = self._bg_task(lambda: tools.site_login(url), "site_login_done")
+        r = self._bg_task(lambda: tools.site_login(url), "site_login_done", lock=self._login_busy)
         if r.get("ok"):
             r["message"] = "已打开登录窗口，登录后在设置页点「完成登录」"
         return r
