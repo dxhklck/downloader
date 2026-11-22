@@ -115,7 +115,13 @@ jobs:
         shell: pwsh
         run: |
           choco install innosetup -y --no-progress
-          Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl' -OutFile installer/ChineseSimplified.isl
+          # 中文语言文件上游 URL 已失效；下载不到就去掉该语言行，用内置英文安装界面
+          try {
+            Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl' -OutFile installer/ChineseSimplified.isl -ErrorAction Stop
+          } catch {
+            Write-Host '中文语言文件下载失败，安装界面将使用默认英文'
+            (Get-Content installer/installer.iss) | Where-Object { $_ -notmatch 'chinesesimplified' } | Set-Content installer/installer.iss
+          }
           $ver = python -c "import build; print(build.APP_VERSION)"
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$ver" installer/installer.iss
 
