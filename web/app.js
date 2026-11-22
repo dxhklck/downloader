@@ -89,15 +89,59 @@ function addMessage(text, who) {
   return div;
 }
 
+function toolStatusCard(name, args, status) {
+  const rows = Object.entries(args || {}).map(([k, v]) =>
+    '<div class="tool-card-row"><span class="tool-card-key">' + escapeHtml(k) +
+    '</span><span class="tool-card-val">' + escapeHtml(typeof v === 'object' ? JSON.stringify(v) : v) +
+    '</span></div>').join('');
+  return '<div class="msg msg-agent">' +
+    '<div class="msg-avatar">助</div>' +
+    '<div class="msg-body"><div class="tool-card" data-tool-card>' +
+    '<div class="tool-card-head"><span class="tool-card-icon">&gt;</span>' +
+    '<span class="tool-card-name">' + escapeHtml(name) + '</span>' +
+    '<span class="tool-card-state ' + status.cls + '">' + escapeHtml(status.text) + '</span></div>' +
+    (rows ? '<div class="tool-card-args">' + rows + '</div>' : '') +
+    '</div></div></div>';
+}
+
 function addToolStatus(name, args) {
   const div = document.createElement('div');
-  div.className = 'msg msg-agent';
-  div.innerHTML =
-    '<div class="msg-avatar">助</div>' +
-    '<div class="msg-body"><div class="msg-tool">调用工具 <b>' + escapeHtml(name) +
-    '</b> ' + escapeHtml(JSON.stringify(args)) + '</div></div>';
-  $('chatLog').appendChild(div);
+  div.innerHTML = toolStatusCard(name, args, { cls: 'pending', text: '调用中' });
+  const card = div.firstChild;
+  $('chatLog').appendChild(card);
+  card.dataset.toolName = name;
+  card.dataset.toolArgs = JSON.stringify(args || {});
   scrollChat();
+  saveHistory();
+}
+
+function markToolStatus(result) {
+  const cards = $('chatLog').querySelectorAll('.tool-card[data-tool-name]');
+  const card = Array.from(cards).reverse().find((n) => !n.dataset.toolDone);
+  if (!card) return;
+  let args = {};
+  try { args = JSON.parse(card.dataset.toolArgs || '{}'); } catch (e) {}
+  const ok = !!(result && result.success);
+  card.dataset.toolDone = ok ? 'ok' : 'fail';
+  const head = card.querySelector('.tool-card-head');
+  if (head) {
+    const old = head.querySelector('.tool-card-state');
+    if (old) old.remove();
+    const state = document.createElement('span');
+    state.className = 'tool-card-state ' + (ok ? 'ok' : 'fail');
+    state.textContent = ok ? '完成' : '失败';
+    head.appendChild(state);
+  }
+  if (!ok) {
+    const argsBox = card.querySelector('.tool-card-args');
+    const detail = result && (result.detail || result.message);
+    if (detail) {
+      const err = document.createElement('div');
+      err.className = 'tool-card-error';
+      err.textContent = String(detail);
+      (argsBox || card.querySelector('.tool-card')).appendChild(err);
+    }
+  }
   saveHistory();
 }
 
@@ -190,6 +234,7 @@ async function poll() {
           addToolStatus(ev.data.name, ev.data.args);
           break;
         case 'result':
+          markToolStatus(ev.data);
           addResult(ev.data);
           break;
         case 'done':
