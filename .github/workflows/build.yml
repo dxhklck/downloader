@@ -92,12 +92,22 @@ jobs:
         if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgirepository1.0-dev libwebkit2gtk-4.1-dev libcairo2-dev
-          pip install pygobject
+          # 用系统 pygobject，避免 pip 源码编译依赖 girepository-2.0-dev
+          sudo apt-get install -y python3-gi gir1.2-webkit2-4.1 libcairo2-dev
+          # setup-python 的 Python 看不到系统 site-packages，链接过去
+          SITE=$(python -c "import site; print(site.getsitepackages()[0])")
+          sudo ln -sf /usr/lib/python3/dist-packages/gi $SITE/gi
+          for so in /usr/lib/python3/dist-packages/_gi*.so /usr/lib/python3/dist-packages/gi/_gi*.so; do
+            [ -e "$so" ] && sudo ln -sf "$so" "$SITE/"
+          done
+          echo 'import gi; print("gi OK")' > /tmp/gi_check.py
+          python /tmp/gi_check.py
 
       # ---- PyInstaller 构建（build.py 已跨平台适配） ----
       - name: Build app
         run: python build.py
+        env:
+          PYTHONIOENCODING: utf-8
 
       # ---- 平台安装包 ----
       - name: Make installer (Windows / Inno Setup)
