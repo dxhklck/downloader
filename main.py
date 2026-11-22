@@ -181,8 +181,9 @@ def main():
         background_color="#F5F5F5",
     )
     icon = os.path.join(config._RES_DIR, "assets", "app.ico")
-    webview.start(gui="edgechromium", debug=False,
-                  icon=icon if os.path.isfile(icon) else None)
+    # 不硬编码 gui：Windows 用 EdgeChromium，macOS 用 Cocoa，Linux 用 GTK，
+    # 由 pywebview 按平台自动选择，否则 mac/Linux 安装包启动即失败。
+    webview.start(debug=False, icon=icon if os.path.isfile(icon) else None)
 
 
 if __name__ == "__main__":
