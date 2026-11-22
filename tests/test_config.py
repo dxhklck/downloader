@@ -43,3 +43,16 @@ def test_save_config_corrupted_file_falls_back(tmp_path, monkeypatch):
     path.write_text("{invalid", encoding="utf-8")
     monkeypatch.setattr(config, "CONFIG_FILE", str(path))
     assert config.load()["provider"] == "zhipu"
+
+
+def test_export_import_ignore_sensitive_keys(cfg_file):
+    config.save({"api_key": "secret", "model": "m1", "theme": "light"})
+    exported = config.export_config()
+    assert exported["ok"] is True
+    assert "api_key" not in exported["config"]
+    assert exported["config"]["theme"] == "light"
+
+    result = config.import_config({"theme": "dark", "api_key": "hacked"})
+    assert result["ok"] is True
+    assert config.load()["api_key"] == "secret"
+    assert config.load()["theme"] == "dark"

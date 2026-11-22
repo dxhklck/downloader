@@ -103,11 +103,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "url_download",
-            "description": "按视频网页链接下载任意网站的视频。用户给出 http:// 或 https:// 链接（如 YouTube、B站、抖音、微博等）时用这个工具，不要用 douyin_random。参数只有一个：完整的视频链接 url。",
+            "description": "按视频网页链接下载任意网站的视频。用户给出 http:// 或 https:// 链接（如 YouTube、B站、抖音、微博等）时用这个工具，不要用 douyin_random。参数：url 必填；quality 可选 best/1080/720。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "url": {"type": "string", "description": "完整的视频网页链接，以 http:// 或 https:// 开头"},
+                    "quality": {"type": "string", "enum": ["best", "1080", "720"], "description": "画质档位，默认 best"},
                 },
                 "required": ["url"],
             },

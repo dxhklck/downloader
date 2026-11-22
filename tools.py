@@ -7,12 +7,14 @@ import os, sys, json, re, time, random, subprocess, urllib.request, threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import config
+import logutil
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36"
 
 # 任务状态（全局，界面轮询用）
 STATE = {"running": False, "task": "", "done": 0, "total": 0, "logs": [],
-         "log_gen": 0, "cancelled": False, "episodes": {}}
+         "log_gen": 0, "cancelled": False, "episodes": {}, "attempts": {},
+         "queue": [], "current_job": None}
 STATE_LOCK = threading.Lock()
 
 # 通用站点登录：后台线程持有浏览器，前端点"完成登录"置 done 标志
@@ -42,7 +44,7 @@ def try_start(task):
         if STATE["running"]:
             return False
         STATE.update(running=True, task=task, done=0, total=0, logs=[],
-                     cancelled=False, episodes={})
+                     cancelled=False, episodes={}, attempts={})
         return True
 
 
@@ -61,10 +63,12 @@ def _cancelled():
         return STATE["cancelled"]
 
 
-def set_episode(ep, status):
-    """上报单集状态（pending/running/ok/skip/fail），供前端网格展示。"""
+def set_episode(ep, status, attempt=None):
+    """上报单集状态（pending/running/retrying/ok/skip/fail/cancel）。"""
     with STATE_LOCK:
         STATE["episodes"][str(ep)] = status
+        if attempt is not None:
+            STATE["attempts"][str(ep)] = attempt
 
 
 def finish():
@@ -78,6 +82,7 @@ def _log(msg):
         STATE["logs"].append(msg)
         if len(STATE["logs"]) > 200:
             STATE["logs"] = STATE["logs"][-200:]
+    logutil.info(msg)
 
 
 def get_state():
@@ -93,6 +98,13 @@ def clear_logs():
         return {"ok": True, "log_gen": STATE["log_gen"]}
 
 
+def set_queue_snapshot(queued, current=None):
+    """由 Api 层调用：同步队列快照到 state，供前端展示。"""
+    with STATE_LOCK:
+        STATE["queue"] = [dict(x) for x in queued]
+        STATE["current_job"] = dict(current) if current else None
+
+
 def _set(**kw):
     with STATE_LOCK:
         STATE.update(kw)
@@ -104,6 +116,33 @@ def _ok(msg, **data):
 
 def _fail(msg):
     return {"success": False, "message": msg, "data": {}}
+
+
+def get_login_status():
+    """只读 Cookie 文件元信息，不返回任何 Cookie 值。"""
+    def domains(path):
+        if not os.path.isfile(path):
+            return None
+        found = set()
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if line.startswith("#") or not line.strip():
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) >= 7:
+                        found.add(parts[0].lstrip(".").lower())
+        except OSError:
+            return None
+        return sorted(found)
+
+    return {
+        "bili": {"status": "ok" if domains(config.COOKIE_BILI) else "none"},
+        "douyin": {"status": "ok" if domains(config.COOKIE_DOUYIN) else "none"},
+        "xhs": {"status": "ok" if domains(config.XHS_COOKIE_FILE) else "none"},
+        "site": {"status": "ok" if domains(config.COOKIES_FILE) else "none",
+                 "domains": domains(config.COOKIES_FILE) or []},
+    }
 
 
 # ============ B站下载 ============
@@ -176,7 +215,10 @@ def _bili_one(idx, eps, out_dir, sess):
         return "skip", 0
     vtmp = os.path.join(out_dir, f"{idx:04d}_{title}.v.mp4")
     atmp = os.path.join(out_dir, f"{idx:04d}_{title}.a.m4a")
-    for attempt in range(4):
+    for attempt in range(1, 5):
+        if _cancelled():
+            return "cancel", "用户取消"
+        set_episode(idx, "running" if attempt == 1 else "retrying", attempt)
         try:
             vu, au = _bili_get_dash(ep, sess)
             _bili_fetch(vu, vtmp, sess)
@@ -192,9 +234,10 @@ def _bili_one(idx, eps, out_dir, sess):
                 raise RuntimeError(f"文件过小 {sz}")
             return "ok", sz
         except Exception as e:
-            if attempt == 3:
+            if attempt == 4:
                 return "fail", str(e)[:100]
-            time.sleep(2 ** attempt)
+            _log(f"第{idx}集第{attempt}次失败，准备重试：{str(e)[:100]}")
+            time.sleep(2 ** (attempt - 1))
     return "fail", "unknown"
 
 
@@ -228,9 +271,8 @@ def bili_download(start, end, out_dir=None, workers=4, ep_path=None):
 
     def work(i):
         if _cancelled():
-            set_episode(i, "cancelled")
+            set_episode(i, "cancel")
             return "cancel"
-        set_episode(i, "running")
         st, info = _bili_one(i, eps, out_dir, sess)
         with STATE_LOCK:
             STATE["done"] += 1
@@ -883,9 +925,10 @@ def url_download(url, quality="best"):
             if p:
                 _log(f"下载中 {p}")
 
-    # 格式选择：优先 1080P 以下有音视频的，避免下载 4K 大会员/超大文件
-    fmt = ("bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
-           if quality == "best" else "best")
+    # 格式选择：best 限 1080P，避免 4K 大会员/超大文件
+    height_map = {"best": 1080, "1080": 1080, "720": 720}
+    height = height_map.get(str(quality), 1080)
+    fmt = (f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best")
     opts = {
         "format": fmt,
         "merge_output_format": "mp4",

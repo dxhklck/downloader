@@ -3,7 +3,7 @@
 双击运行或：python main.py
 界面用 WebView2 渲染，JS 通过 js_api 直接调用本文件的 Api 类。
 """
-import os, sys, json, threading, queue, webview
+import os, sys, json, threading, queue, itertools, webview
 
 import config
 import tools
@@ -17,8 +17,14 @@ class Api:
     def __init__(self):
         self.q = queue.Queue()           # 事件队列 -> 界面轮询
         self.agent = Agent(self._emit)
-        self._chat_busy = threading.Lock()   # 只串行化对话，防连发导致多 agent 线程并发
+        self._chat_busy = threading.Lock()   # 兼容既有测试：表示 worker 正占用
         self._login_busy = threading.Lock()  # 登录独立占用，不再阻塞对话
+        self._jobs = queue.Queue()
+        self._job_ids = itertools.count(1)
+        self._job_lock = threading.Lock()
+        self._queue = []
+        self._current_job = None
+        threading.Thread(target=self._job_worker, daemon=True).start()
 
     @staticmethod
     def _err(e):
@@ -49,19 +55,74 @@ class Api:
         out.append({"event": "state", "data": tools.get_state()})
         return out
 
-    # ---- 对话 ----
-    def chat(self, text):
-        """用户发言。下载是长任务，放后台线程，不阻塞界面。"""
-        if not self._chat_busy.acquire(blocking=False):
-            return {"ok": False, "message": "上一条指令还在处理中，请稍候"}
-        def run():
+    # ---- 对话队列 ----
+    def _job_worker(self):
+        while True:
+            job = self._jobs.get()
+            with self._job_lock:
+                self._current_job = job
+                self._sync_queue()
+            self._emit("job_start", {"id": job["id"], "kind": job["kind"]})
             try:
-                self.agent.chat(text)
+                self._chat_busy.acquire()
+                try:
+                    if job["kind"] == "chat":
+                        self.agent.chat(job["text"])
+                    else:
+                        self._run_tool(job["name"], job["args"])
+                finally:
+                    self._chat_busy.release()
             finally:
-                self._emit("done", {})  # 唯一解锁信号，前端据此结束本轮
-                self._chat_busy.release()
-        threading.Thread(target=run, daemon=True).start()
-        return {"ok": True}
+                with self._job_lock:
+                    self._current_job = None
+                    self._sync_queue()
+                self._emit("done", {"id": job["id"], "kind": job["kind"]})
+                self._jobs.task_done()
+
+    def _sync_queue(self):
+        queued = []
+        for job in list(self._jobs.queue):
+            queued.append({"id": job["id"], "kind": job["kind"], "name": job.get("name") or job.get("text", "")})
+        tools.set_queue_snapshot(queued, self._current_job)
+
+    def _enqueue(self, kind, **data):
+        job = {"id": next(self._job_ids), "kind": kind, **data}
+        with self._job_lock:
+            self._jobs.put(job)
+            self._sync_queue()
+        return job["id"]
+
+    def _run_tool(self, name, args):
+        import tools
+        if not name.startswith("_") and not hasattr(tools, name):
+            name = "tools." + name
+        fn = tools
+        for part in name.split("."):
+            if part.startswith("_"):
+                fn = None
+                break
+            fn = getattr(fn, part, None)
+            if fn is None:
+                break
+        if not callable(fn):
+            result = {"success": False, "message": f"未知工具：{name}"}
+        else:
+            try:
+                result = fn(**args)
+            except Exception as e:
+                result = self._err(e)
+        self._emit("tool", {"name": name, "args": args, "job_id": self._current_job["id"]})
+        self._emit("result", result)
+
+    def chat(self, text):
+        """用户发言：进入 FIFO 队列，由单 worker 顺序执行。"""
+        job_id = self._enqueue("chat", text=text)
+        return {"ok": True, "id": job_id, "message": "已加入队列"}
+
+    def retry_tool(self, name, args):
+        """失败工具重试：与对话共用同一队列。"""
+        job_id = self._enqueue("tool", name=name, args=args)
+        return {"ok": True, "id": job_id, "message": "重试已加入队列"}
 
     # ---- 主题 ----
     def get_theme(self):
@@ -167,6 +228,15 @@ class Api:
         """请求取消当前下载任务。"""
         return tools.cancel_task()
 
+    def get_login_status(self):
+        return tools.get_login_status()
+
+    def export_config(self):
+        return config.export_config()
+
+    def import_config(self, payload):
+        return config.import_config(payload)
+
     def get_paths(self):
         """返回当前数据目录，供设置页展示/确认。"""
         return {"ok": True, "root": config.ROOT, "dir_bili": config.DIR_BILI,
@@ -181,7 +251,7 @@ def main():
         os.path.join(web_dir, "index.html"),
         js_api=api,
         width=1180, height=760,
-        min_size=(900, 600),
+        min_size=(760, 520),
         background_color="#F5F5F5",
     )
     icon = os.path.join(config._RES_DIR, "assets", "app.ico")

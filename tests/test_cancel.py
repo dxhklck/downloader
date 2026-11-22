@@ -23,12 +23,13 @@ def test_cancel_task_sets_flag():
 def test_try_start_resets_cancel_and_episodes():
     assert tools.try_start("任务一") is True
     tools.cancel_task()
-    tools.set_episode(3, "ok")
+    tools.set_episode(3, "ok", 2)
     tools.finish()
     assert tools.try_start("任务二") is True
     try:
         assert tools._cancelled() is False
         assert tools.get_state()["episodes"] == {}
+        assert tools.get_state()["attempts"] == {}
     finally:
         tools.finish()
 

@@ -143,6 +143,36 @@ def save(cfg):
                     pass
 
 
+EXPORT_KEYS = ("provider", "model", "proxy", "theme", "quality", "notify_on_complete", "root")
+SENSITIVE_KEYS = ("api_key", "xhs_cookie", "apikey", "cookie", "cookies")
+
+
+def export_config():
+    """只导出非敏感偏好；API Key/Cookie 一律跳过。"""
+    cfg = load()
+    data = {k: cfg[k] for k in EXPORT_KEYS if k in cfg}
+    return {"ok": True, "config": data, "skipped": list(SENSITIVE_KEYS)}
+
+
+def import_config(payload):
+    """导入白名单字段；敏感字段即使传入也忽略。"""
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            return {"ok": False, "message": "配置格式不是有效 JSON"}
+    if not isinstance(payload, dict):
+        return {"ok": False, "message": "配置必须是 JSON 对象"}
+    cfg = payload.get("config", payload)
+    if not isinstance(cfg, dict):
+        return {"ok": False, "message": "配置内容必须是 JSON 对象"}
+    clean = {k: cfg[k] for k in EXPORT_KEYS if k in cfg}
+    if clean:
+        save(clean)
+    return {"ok": True, "message": f"已导入 {len(clean)} 项配置", "imported": list(clean),
+            "skipped": list(SENSITIVE_KEYS)}
+
+
 def proxy_url():
     """返回用户配置的代理地址（给 yt-dlp 用），未配置返回空串。"""
     return (load().get("proxy") or "").strip()

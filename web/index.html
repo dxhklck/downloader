@@ -74,6 +74,7 @@
           <span id="progressPct">0%</span>
         </div>
         <div id="episodeGrid" class="episode-grid hidden"></div>
+        <div id="queueList" class="queue-list hidden"></div>
         <button id="cancelTaskBtn" class="btn btn-ghost cancel-btn hidden">取消任务</button>
       </div>
 
@@ -104,11 +105,38 @@
             <option value="size">大小</option>
             <option value="dur">时长</option>
           </select>
+          <select id="assetExt">
+            <option value="">全部格式</option>
+            <option value=".mp4">mp4</option><option value=".mkv">mkv</option>
+            <option value=".avi">avi</option><option value=".mov">mov</option>
+            <option value=".flv">flv</option><option value=".webm">webm</option>
+          </select>
+          <select id="assetSize">
+            <option value="">全部大小</option>
+            <option value="small">&lt; 100 MB</option>
+            <option value="medium">100 MB - 1 GB</option>
+            <option value="large">&gt; 1 GB</option>
+          </select>
+          <select id="assetDuration">
+            <option value="">全部时长</option>
+            <option value="short">&lt; 5 分钟</option>
+            <option value="medium">5 - 30 分钟</option>
+            <option value="long">&gt; 30 分钟</option>
+          </select>
+          <select id="assetDate">
+            <option value="">全部日期</option>
+            <option value="7">最近 7 天</option>
+            <option value="30">最近 30 天</option>
+            <option value="365">最近一年</option>
+          </select>
+          <button id="assetSelectAll" class="btn btn-ghost">全选本页</button>
+          <button id="assetCopyPaths" class="btn btn-ghost">复制路径</button>
+          <button id="assetExportCsv" class="btn btn-ghost">导出 CSV</button>
         </div>
       </div>
       <div class="asset-table-wrap">
         <table class="asset-table">
-          <thead><tr><th>文件名</th><th>分类</th><th>大小</th><th>时长</th><th>修改日期</th></tr></thead>
+          <thead><tr><th>选</th><th>文件名</th><th>分类</th><th>大小</th><th>时长</th><th>修改日期</th></tr></thead>
           <tbody id="assetRows"></tbody>
         </table>
       </div>
@@ -137,6 +165,20 @@
           <span class="field-label">模型名（可选）</span>
           <input id="modelInput" type="text" placeholder="留空用默认模型">
         </label>
+        <div class="field">
+          <span class="field-label">站点登录状态</span>
+          <div id="loginStatus" class="login-status">打开设置后自动检测</div>
+          <div class="field-actions" style="display:flex;gap:8px;margin-top:8px;">
+            <button id="refreshLoginBtn" class="btn btn-ghost">刷新登录状态</button>
+          </div>
+        </div>
+        <div class="field">
+          <span class="field-label">配置备份（不含 API Key / Cookie）</span>
+          <div class="field-actions" style="display:flex;gap:8px;margin-top:8px;">
+            <button id="exportConfigBtn" class="btn btn-ghost">导出配置</button>
+            <button id="importConfigBtn" class="btn btn-ghost">导入配置</button>
+          </div>
+        </div>
         <label class="field">
           <span class="field-label">站点登录（小红书、微博等需登录的站点）</span>
           <input id="siteUrlInput" type="text" placeholder="粘贴网站首页，如 https://www.xiaohongshu.com">

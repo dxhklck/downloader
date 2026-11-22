@@ -2,6 +2,8 @@
 let api = null;
 let lastLogCount = 0;
 let isBusy = false;        // 发送锁：仅本轮 chat 终结时解锁，poll 不得提前解锁
+let activeJobId = null;    // 当前 job id，done 只解锁对应轮次
+let lastToolCall = null;   // 最近一次工具调用，供结果卡重试
 let logGen = -1;           // 日志代际号，配合后端 clear_logs 丢弃在途旧日志
 const ERR_HINT = {
   1455: '电脑内存临时不够了，请关掉其它程序再试',
@@ -111,6 +113,7 @@ function addToolStatus(name, args) {
   $('chatLog').appendChild(card);
   card.dataset.toolName = name;
   card.dataset.toolArgs = JSON.stringify(args || {});
+  lastToolCall = { name, args: args || {} };
   scrollChat();
   saveHistory();
 }
@@ -158,14 +161,31 @@ function addResult(result) {
   const text = result.success
     ? ('✓ ' + (result.message || ''))
     : ('✗ ' + friendlyError(result.detail || result.message));
+  const retry = (!result.success && lastToolCall)
+    ? '<button class="text-btn retry-btn" data-retry>重试</button>' : '';
   div.innerHTML =
     '<div class="msg-avatar">助</div>' +
     '<div class="msg-body"><div class="msg-result ' + cls + '">' +
     escapeHtml(text) + '</div>' +
-    (result.success ? '' : detailBlock(result.detail || result.message)) + '</div>';
+    (result.success ? '' : detailBlock(result.detail || result.message) + retry) + '</div>';
   $('chatLog').appendChild(div);
+  div.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-retry]');
+    if (btn) retryResult(btn);
+  });
   scrollChat();
   saveHistory();
+}
+
+async function retryResult(btn) {
+  if (!lastToolCall) return;
+  btn.disabled = true;
+  try {
+    const r = await api.retry_tool(lastToolCall.name, lastToolCall.args);
+    if (r && r.ok) addMessage('重试：' + lastToolCall.name, 'user');
+    else addResult(r);
+  } catch (e) { addResult({ success: false, message: friendlyError(e), detail: String(e) }); }
+  btn.disabled = false;
 }
 
 // 思考中占位：发送后立即插入，收到首个真实回复时移除
@@ -194,7 +214,8 @@ async function send() {
   $('toolStatus').textContent = '处理中...';
   try {
     const r = await api.chat(text);
-    // 后端并发拒绝时立即解锁，避免永久锁死
+    if (r && r.id) activeJobId = r.id;
+    // 后端拒绝时立即解锁，避免永久锁死
     if (r && r.ok === false) {
       removeThinking();
       addResult(r);
@@ -238,7 +259,7 @@ async function poll() {
           addResult(ev.data);
           break;
         case 'done':
-          endTurn();  // 本轮真正结束才解锁，poll 不再提前解禁
+          if (activeJobId === null || !ev.data || ev.data.id === activeJobId) endTurn();
           break;
         case 'xhs_login_done':
         case 'site_login_done':
@@ -270,6 +291,14 @@ function updateState(s) {
     pill.textContent = '就绪'; pill.className = 'pill pill-done';
   } else {
     pill.textContent = '就绪'; pill.className = 'pill pill-muted';
+  }
+
+  const queueBox = $('queueList');
+  const queue = s.queue || [];
+  if (queueBox) {
+    queueBox.classList.toggle('hidden', queue.length === 0);
+    queueBox.innerHTML = queue.map((q) => '<div class="queue-item">#' + escapeHtml(q.id) +
+      ' ' + escapeHtml(typeof q.name === 'string' ? q.name.slice(0, 40) : q.name) + '</div>').join('');
   }
 
   // 每集进度网格 + 取消按钮
@@ -332,6 +361,42 @@ async function openSettings() {
   $('siteUrlInput').value = cfg.last_site || '';
   $('testResult').textContent = '';
   $('settingsOverlay').classList.remove('hidden');
+  refreshLoginStatus();
+}
+
+async function refreshLoginStatus() {
+  const box = $('loginStatus');
+  if (!box) return;
+  box.textContent = '检测中...';
+  try {
+    const r = await api.get_login_status();
+    const label = { ok: '已登录', none: '未登录', unknown: '未知' };
+    box.innerHTML = Object.entries(r).map(([k, v]) =>
+      '<div class="login-item"><b>' + escapeHtml(k) + '</b> ' + escapeHtml(label[v.status] || v.status) +
+      (v.domains && v.domains.length ? ' (' + escapeHtml(v.domains.slice(0, 3).join(', ')) + ')' : '') +
+      '</div>').join('');
+  } catch (e) { box.textContent = '检测失败：' + friendlyError(e); }
+}
+
+async function exportConfig() {
+  try {
+    const r = await api.export_config();
+    const text = JSON.stringify(r.config, null, 2);
+    const blob = new Blob([text], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'downloader-config.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    showTest(r);
+  } catch (e) { showTest({ ok: false, message: friendlyError(e), detail: String(e) }); }
+}
+
+async function importConfig() {
+  const text = prompt('粘贴之前导出的配置 JSON；API Key/Cookie 不会导入');
+  if (!text) return;
+  try { showTest(await api.import_config(text)); }
+  catch (e) { showTest({ ok: false, message: friendlyError(e), detail: String(e) }); }
 }
 
 function showTest(r) {
@@ -401,6 +466,7 @@ async function loadAssets(force) {
     const r = await api.asset_scan(!!force);
     if (!r.success) { $('assetStats').textContent = '扫描失败：' + friendlyError(r.message); return; }
     assetsData = r.data.items;
+    if (r.message) window.lastAssetScanMessage = r.message;
     renderCats(r.data.stats);
     renderAssets();
   } catch (e) {
@@ -423,15 +489,29 @@ function renderCats(stats) {
     d.onclick = () => { currentCat=cat; renderCats(stats); renderAssets(); };
     tree.appendChild(d);
   });
-  $('assetStats').innerHTML = '共 <b>'+stats.total+'</b> 个视频，<b>'+stats.total_gb+' GB</b>';
+  $('assetStats').innerHTML = '共 <b>'+stats.total+'</b> 个视频，<b>'+stats.total_gb+' GB</b>' +
+    (window.lastAssetScanMessage ? '<span class="asset-scan-note"> · ' + escapeHtml(window.lastAssetScanMessage) + '</span>' : '');
 }
 
 function renderAssets() {
   const q = $('assetSearch').value.trim().toLowerCase();
   const sort = $('assetSort').value;
+  const ext = $('assetExt').value;
+  const size = $('assetSize').value;
+  const dur = $('assetDuration').value;
+  const days = Number($('assetDate').value || 0);
+  const cutoff = days ? Date.now() / 1000 - days * 86400 : 0;
   let rows = assetsData.filter(x =>
     (currentCat==='__all__' || x.cat===currentCat) &&
-    (!q || x.name.toLowerCase().includes(q) || x.rel.toLowerCase().includes(q))
+    (!q || x.name.toLowerCase().includes(q) || x.rel.toLowerCase().includes(q)) &&
+    (!ext || x.name.toLowerCase().endsWith(ext)) &&
+    (!size || (size==='small' && x.size < 100*2**20) ||
+      (size==='medium' && x.size >= 100*2**20 && x.size <= 2**30) ||
+      (size==='large' && x.size > 2**30)) &&
+    (!dur || (dur==='short' && x.dur < 300) ||
+      (dur==='medium' && x.dur >= 300 && x.dur <= 1800) ||
+      (dur==='long' && x.dur > 1800)) &&
+    (!cutoff || x.mtime >= cutoff)
   );
   rows.sort((a,b) => {
     let v = 0;
@@ -446,6 +526,7 @@ function renderAssets() {
   const shown = rows.slice(0, CAP);
   tbody.innerHTML = shown.map(x =>
     '<tr data-path="'+escapeHtml(x.path)+'">' +
+    '<td><input type="checkbox" class="asset-check"></td>' +
     '<td class="fname" title="'+escapeHtml(x.rel)+'">'+escapeHtml(x.name)+'</td>' +
     '<td>'+escapeHtml(x.cat)+'</td>' +
     '<td class="num">'+fmtSize(x.size)+'</td>' +
@@ -454,6 +535,24 @@ function renderAssets() {
   ).join('');
   const more = rows.length > CAP ? ' · 仅显示前 '+CAP+' 行，请细化搜索' : '';
   $('assetFooter').textContent = '显示 '+shown.length+' / '+assetsData.length+' 个 · 双击打开 · 右键定位文件'+more;
+}
+
+function selectedAssets() {
+  return Array.from($('assetRows').querySelectorAll('tr[data-path]'))
+    .filter((tr) => tr.querySelector('.asset-check').checked)
+    .map((tr) => tr.dataset.path);
+}
+
+function exportAssetCsv() {
+  const paths = selectedAssets();
+  if (!paths.length) { $('assetFooter').textContent = '请先勾选视频'; return; }
+  const csv = 'path\n' + paths.map((p) => '"' + p.replace(/"/g, '""') + '"').join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'video_assets.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
 }
 
 // 事件委托：只在 tbody 上绑一次，避免每次渲染绑定 2N 个监听器
@@ -504,7 +603,19 @@ onReady(async () => {
   $('rescanBtn').onclick = () => loadAssets(true);
   initAssetEvents();
   $('assetSearch').addEventListener('input', debouncedSearch);
-  $('assetSort').addEventListener('change', renderAssets);
+  ['assetExt','assetSize','assetDuration','assetDate'].forEach((id) => $(id).addEventListener('change', renderAssets));
+  $('assetSelectAll').addEventListener('click', () => {
+    const checks = $('assetRows').querySelectorAll('.asset-check');
+    const shouldCheck = Array.from(checks).some((c) => !c.checked);
+    checks.forEach((c) => { c.checked = shouldCheck; });
+  });
+  $('assetCopyPaths').addEventListener('click', async () => {
+    const paths = selectedAssets();
+    if (!paths.length) { $('assetFooter').textContent = '请先勾选视频'; return; }
+    try { await navigator.clipboard.writeText(paths.join('\n')); $('assetFooter').textContent = '已复制 '+paths.length+' 条路径'; }
+    catch (e) { $('assetFooter').textContent = '复制失败：' + friendlyError(e); }
+  });
+  $('assetExportCsv').addEventListener('click', exportAssetCsv);
   restoreHistory();
   $('clearChatBtn').addEventListener('click', clearHistory);
   $('cancelTaskBtn').addEventListener('click', async () => {
@@ -514,7 +625,9 @@ onReady(async () => {
     } catch (e) { console.error('cancel failed', e); }
   });
   $('sendBtn').addEventListener('click', send);
-  $('chatInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
+  $('chatInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey || !e.shiftKey)) send();
+  });
   $('settingsBtn').addEventListener('click', openSettings);
   $('closeSettings').addEventListener('click', () => $('settingsOverlay').classList.add('hidden'));
   $('settingsOverlay').addEventListener('click', (e) => {
@@ -522,6 +635,9 @@ onReady(async () => {
   });
   $('saveBtn').addEventListener('click', saveSettings);
   $('testBtn').addEventListener('click', testLLM);
+  $('refreshLoginBtn').addEventListener('click', refreshLoginStatus);
+  $('exportConfigBtn').addEventListener('click', exportConfig);
+  $('importConfigBtn').addEventListener('click', importConfig);
   // 统一登录入口：小红书网址自动走扫码识别，其他网站走通用登录
   $('siteLoginBtn').addEventListener('click', async () => {
     const url = $('siteUrlInput').value.trim();

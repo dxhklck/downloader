@@ -28,3 +28,15 @@ def test_site_login_rejects_bad_url():
     result = tools.site_login("ftp://example.com")
     assert result["success"] is False
     assert "http" in result["message"]
+
+
+def test_get_login_status_never_returns_cookie_values(tmp_path, monkeypatch):
+    bili = tmp_path / "bili.txt"
+    bili.write_text(".bilibili.com\tTRUE\t/\tFALSE\t0\tSESSDATA\tsecret\n", encoding="utf-8")
+    monkeypatch.setattr(tools.config, "COOKIE_BILI", str(bili))
+    monkeypatch.setattr(tools.config, "COOKIE_DOUYIN", str(tmp_path / "none.txt"))
+    monkeypatch.setattr(tools.config, "XHS_COOKIE_FILE", str(tmp_path / "none2.txt"))
+    monkeypatch.setattr(tools.config, "COOKIES_FILE", str(tmp_path / "none3.txt"))
+    status = tools.get_login_status()
+    assert status["bili"]["status"] == "ok"
+    assert "secret" not in repr(status)
