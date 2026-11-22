@@ -135,29 +135,26 @@
           <input id="modelInput" type="text" placeholder="留空用默认模型">
         </label>
         <label class="field">
-          <span class="field-label">代理（可选，用于 YouTube 等）</span>
-          <input id="proxyInput" type="text" placeholder="如 http://127.0.0.1:7890">
-          <span class="field-hint">要下载 YouTube 需填你自己的代理地址；留空则直连</span>
-        </label>
-        <label class="field">
-          <span class="field-label">网站登录（任意视频站点通用）</span>
-          <input id="siteUrlInput" type="text" placeholder="如 https://www.xiaohongshu.com">
+          <span class="field-label">站点登录（小红书、微博等需登录的站点）</span>
+          <input id="siteUrlInput" type="text" placeholder="粘贴网站首页，如 https://www.xiaohongshu.com">
           <div class="field-actions" style="display:flex;gap:8px;margin-top:8px;">
             <button id="siteLoginBtn" class="btn btn-ghost">打开登录窗口</button>
             <button id="confirmLoginBtn" class="btn btn-ghost">完成登录</button>
           </div>
-          <span class="field-hint">粘贴网站首页 → 打开窗口登录 → 回来点「完成登录」。登录态自动记住，之后发链接即可下载</span>
+          <span class="field-hint">打开窗口登录即可；小红书自动识别无需点「完成登录」，其他网站登录后点一下「完成登录」。登录态记住，之后发链接就能下</span>
         </label>
-        <label class="field">
-          <span class="field-label">小红书快捷登录</span>
-          <button id="xhsLoginBtn" class="btn btn-ghost">扫码登录（自动识别）</button>
-          <span class="field-hint">小红书专用：扫码后自动识别，无需点完成</span>
-        </label>
-        <label class="field">
-          <span class="field-label">Cookie（手动备用）</span>
-          <textarea id="xhsCookieInput" rows="2" placeholder="登录都失败时才需手动粘贴 Cookie"></textarea>
-          <span class="field-hint">一般不用填；自动登录都失败时才用</span>
-        </label>
+        <details class="field adv-field">
+          <summary class="field-label">高级（通常不用改）</summary>
+          <label class="field">
+            <span class="field-label">代理地址</span>
+            <input id="proxyInput" type="text" placeholder="留空即可——程序自动探测系统代理">
+            <span class="field-hint">YouTube 等墙外站点：开着代理软件就会自动用上，一般不用填</span>
+          </label>
+          <label class="field">
+            <span class="field-label">手动 Cookie（登录失败时的备用）</span>
+            <textarea id="xhsCookieInput" rows="2" placeholder="一般不用填"></textarea>
+          </label>
+        </details>
         <div class="settings-actions">
           <button id="testBtn" class="btn btn-ghost">测试连接</button>
           <button id="saveBtn" class="btn btn-primary">保存</button>

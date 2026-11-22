@@ -797,3 +797,10 @@ a:focus-visible {
     transition-duration: .01ms !important;
   }
 }
+
+/* 设置页「高级」折叠区 */
+details.adv-field { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 4px; }
+details.adv-field > summary { cursor: pointer; user-select: none; color: var(--text-muted); }
+details.adv-field > summary::marker { color: var(--text-muted); }
+details.adv-field > summary:hover { color: var(--text-primary); }
+details.adv-field .field { margin-top: 10px; }

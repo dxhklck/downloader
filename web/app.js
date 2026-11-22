@@ -413,24 +413,20 @@ onReady(async () => {
   });
   $('saveBtn').addEventListener('click', saveSettings);
   $('testBtn').addEventListener('click', testLLM);
-  $('xhsLoginBtn').addEventListener('click', async () => {
-    $('testResult').textContent = '正在打开小红书窗口，请扫码（最长5分钟）...';
-    $('testResult').className = 'test-result';
-    try {
-      const r = await api.xhs_login();
-      if (r && r.ok === false) { $('testResult').textContent = r.message; $('testResult').className = 'test-result fail'; }
-    } catch (e) { $('testResult').textContent = friendlyError(e); $('testResult').className = 'test-result fail'; }
-  });
+  // 统一登录入口：小红书网址自动走扫码识别，其他网站走通用登录
   $('siteLoginBtn').addEventListener('click', async () => {
     const url = $('siteUrlInput').value.trim();
     if (!/^https?:\/\//i.test(url)) {
       $('testResult').textContent = '请先填写网站首页地址（以 http:// 或 https:// 开头）';
       $('testResult').className = 'test-result fail'; return;
     }
-    $('testResult').textContent = '正在打开登录窗口...';
+    const isXhs = /xiaohongshu\.com|xhslink\.com/i.test(url);
+    $('testResult').textContent = isXhs
+      ? '正在打开小红书窗口，扫码后自动记住（最长5分钟）...'
+      : '正在打开登录窗口，登录完成后回来点「完成登录」...';
     $('testResult').className = 'test-result';
     try {
-      const r = await api.site_login(url);
+      const r = isXhs ? await api.xhs_login() : await api.site_login(url);
       if (r && r.ok === false) { $('testResult').textContent = r.message; $('testResult').className = 'test-result fail'; }
     } catch (e) { $('testResult').textContent = friendlyError(e); $('testResult').className = 'test-result fail'; }
   });
