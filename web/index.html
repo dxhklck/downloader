@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>视频下载助手</title>
+<link rel="stylesheet" href="style-graphite.css">
+</head>
+<body>
+<div class="app">
+  <!-- 顶部栏 -->
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-logo" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" aria-label="视频下载助手">
+        <rect x="0" y="0" width="32" height="32" rx="8" fill="var(--primary)"/>
+        <path d="M12 10 L12 20 L21 15 Z" fill="var(--on-primary)"/>
+        <path d="M8 15 L8 23 L24 23 L24 15" fill="none" stroke="var(--on-primary)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M16 20 L16 26 M12.5 22.5 L16 26 L19.5 22.5" fill="none" stroke="var(--on-primary)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span>视频下载助手</span>
+    </div>
+    <div class="topbar-right">
+      <span id="statusPill" class="pill pill-muted">就绪</span>
+      <button id="themeBtn" class="icon-btn" title="切换深浅主题">◐</button>
+      <button id="settingsBtn" class="icon-btn" title="设置">⚙</button>
+    </div>
+  </header>
+
+  <!-- 标签切换 -->
+  <nav class="tabs">
+    <button id="tabDownload" class="tab active">下载</button>
+    <button id="tabAssets" class="tab">资产库</button>
+  </nav>
+
+  <!-- 主体：下载 -->
+  <div class="main" id="viewDownload">
+    <!-- 左：对话区 -->
+    <section class="chat-panel">
+      <div class="chat-head">
+        <h2>对话</h2>
+        <span class="hint">用一句话告诉我下载什么</span>
+      </div>
+      <div id="chatLog" class="chat-log">
+        <div class="msg msg-agent">
+          <div class="msg-avatar">助</div>
+          <div class="msg-body">
+            <div class="msg-text">你好！告诉我下载什么就行，比如：<br>· 下载柯南第1到100集<br>· 随机刷20个搞笑视频<br>· 下100个唱歌的<br>· 抖音登录 / 清理临时文件</div>
+          </div>
+        </div>
+      </div>
+      <div class="chat-input-wrap">
+        <div id="toolStatus" class="tool-status"></div>
+        <div class="chat-input-row">
+          <input id="chatInput" type="text" placeholder="输入指令，回车发送..." autocomplete="off">
+          <button id="sendBtn" class="send-btn">发送</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 右：任务状态 -->
+    <aside class="side-panel">
+      <div class="task-card">
+        <div class="task-head">
+          <h3>当前任务</h3>
+          <span id="taskName" class="task-name">无</span>
+        </div>
+        <div class="progress-wrap">
+          <div id="progressBar" class="progress-bar"></div>
+        </div>
+        <div class="progress-meta">
+          <span id="progressText">0 / 0</span>
+          <span id="progressPct">0%</span>
+        </div>
+      </div>
+
+      <div class="logs-card">
+        <div class="logs-head"><h3>运行日志</h3><button id="clearLogs" class="text-btn">清空</button></div>
+        <div id="logList" class="log-list">
+          <div class="log-empty">暂无日志</div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- 主体：资产库 -->
+  <div class="main hidden" id="viewAssets">
+    <aside class="asset-side">
+      <h3>分类</h3>
+      <div id="catTree" class="cat-tree"><div class="log-empty">加载中...</div></div>
+      <button id="rescanBtn" class="btn btn-ghost rescan-btn">重新扫描</button>
+    </aside>
+    <section class="asset-main">
+      <div class="asset-toolbar">
+        <div id="assetStats" class="asset-stats">加载中...</div>
+        <div class="asset-controls">
+          <input id="assetSearch" type="text" placeholder="搜索文件名...">
+          <select id="assetSort">
+            <option value="mtime">最近修改</option>
+            <option value="name">文件名</option>
+            <option value="size">大小</option>
+            <option value="dur">时长</option>
+          </select>
+        </div>
+      </div>
+      <div class="asset-table-wrap">
+        <table class="asset-table">
+          <thead><tr><th>文件名</th><th>分类</th><th>大小</th><th>时长</th><th>修改日期</th></tr></thead>
+          <tbody id="assetRows"></tbody>
+        </table>
+      </div>
+      <div id="assetFooter" class="asset-footer"></div>
+    </section>
+  </div>
+
+  <!-- 设置抽屉 -->
+  <div id="settingsOverlay" class="overlay hidden">
+    <div class="settings-panel">
+      <div class="settings-head">
+        <h2>设置</h2>
+        <button id="closeSettings" class="icon-btn">✕</button>
+      </div>
+      <div class="settings-body">
+        <label class="field">
+          <span class="field-label">模型供应商</span>
+          <select id="providerSelect"></select>
+        </label>
+        <label class="field">
+          <span class="field-label">API Key</span>
+          <input id="apiKeyInput" type="password" placeholder="粘贴 API Key（仅存本地）">
+          <span class="field-hint">智谱 glm-4-flash 免费，去 open.bigmodel.cn 申请</span>
+        </label>
+        <label class="field">
+          <span class="field-label">模型名（可选）</span>
+          <input id="modelInput" type="text" placeholder="留空用默认模型">
+        </label>
+        <label class="field">
+          <span class="field-label">代理（可选，用于 YouTube 等）</span>
+          <input id="proxyInput" type="text" placeholder="如 http://127.0.0.1:7890">
+          <span class="field-hint">要下载 YouTube 需填你自己的代理地址；留空则直连</span>
+        </label>
+        <label class="field">
+          <span class="field-label">网站登录（任意视频站点通用）</span>
+          <input id="siteUrlInput" type="text" placeholder="如 https://www.xiaohongshu.com">
+          <div class="field-actions" style="display:flex;gap:8px;margin-top:8px;">
+            <button id="siteLoginBtn" class="btn btn-ghost">打开登录窗口</button>
+            <button id="confirmLoginBtn" class="btn btn-ghost">完成登录</button>
+          </div>
+          <span class="field-hint">粘贴网站首页 → 打开窗口登录 → 回来点「完成登录」。登录态自动记住，之后发链接即可下载</span>
+        </label>
+        <label class="field">
+          <span class="field-label">小红书快捷登录</span>
+          <button id="xhsLoginBtn" class="btn btn-ghost">扫码登录（自动识别）</button>
+          <span class="field-hint">小红书专用：扫码后自动识别，无需点完成</span>
+        </label>
+        <label class="field">
+          <span class="field-label">Cookie（手动备用）</span>
+          <textarea id="xhsCookieInput" rows="2" placeholder="登录都失败时才需手动粘贴 Cookie"></textarea>
+          <span class="field-hint">一般不用填；自动登录都失败时才用</span>
+        </label>
+        <div class="settings-actions">
+          <button id="testBtn" class="btn btn-ghost">测试连接</button>
+          <button id="saveBtn" class="btn btn-primary">保存</button>
+        </div>
+        <div id="testResult" class="test-result"></div>
+        <div class="settings-note">
+          Key 只保存在本机 config.json，不会上传。平台改版后更新一次即可。
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

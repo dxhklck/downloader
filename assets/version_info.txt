@@ -1,0 +1,29 @@
+# UTF-8
+# 自动生成于 build.py，勿手工编辑；改版本号请改 build.py 顶部 APP_VERSION
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(1,0,0,0),
+    prodvers=(1,0,0,0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable('080404b0', [
+        StringStruct('CompanyName', '家庭自用'),
+        StringStruct('FileDescription', '对话式视频下载工具：发链接或一句话即可下载 B站/抖音/微博等视频'),
+        StringStruct('FileVersion', '1.0.0.0'),
+        StringStruct('InternalName', '视频下载助手'),
+        StringStruct('LegalCopyright', '仅供个人与家庭学习使用'),
+        StringStruct('OriginalFilename', '视频下载助手.exe'),
+        StringStruct('ProductName', '视频下载助手'),
+        StringStruct('ProductVersion', '1.0.0.0')
+      ])
+    ]),
+    VarFileInfo([VarStruct('Translation', [2052, 1200])])
+  ]
+)

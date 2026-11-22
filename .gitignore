@@ -1,0 +1,43 @@
+# ===== 敏感与本地数据（绝不入库）=====
+# config.json 含 API key
+config.json
+*_cookies.txt
+xhs_cookies.txt
+cookie*.txt
+*_profile/
+xhs_profile/
+asset_cache.json
+数据目录.txt
+
+# ===== 视频/下载数据 =====
+动漫/
+抖音/
+网络视频/
+*.mp4
+*.m4a
+*.part
+_discard/
+_合并测试*/
+
+# ===== 构建产物 =====
+dist/
+dist_v*/
+build/
+build_bak*/
+*.spec
+bin/
+installer_out/
+
+# ===== Python =====
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# ===== 日志与临时 =====
+*.log
+_smoke*
+*.tmp
+
+# ===== 工具目录 =====
+.workbuddy/
