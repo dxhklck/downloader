@@ -195,6 +195,12 @@ def test_dynamic_context_has_no_secrets(monkeypatch):
     assert "bili=ok" in text
 
 
+def test_normalize_result_adds_next_action_for_candidate_lists():
+    result = agent._normalize_result({"success": True, "message": "ok",
+                                      "data": {"items": [{"title": "视频"}]}})
+    assert "等待用户点选" in result["next_action"]
+
+
 def test_clip_history_keeps_recent_messages():
     history = []
     for i in range(20):

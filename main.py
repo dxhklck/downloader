@@ -3,7 +3,7 @@
 双击运行或：python main.py
 界面用 WebView2 渲染，JS 通过 js_api 直接调用本文件的 Api 类。
 """
-import os, sys, json, threading, queue, itertools, webview
+import os, sys, json, re, threading, queue, itertools, webview
 
 import config
 import tools
@@ -154,6 +154,36 @@ class Api:
             return {"ok": False, "message": "重试参数格式不正确"}
         job_id = self._enqueue("tool", name=base, args=args)
         return {"ok": True, "id": job_id, "message": "重试已加入队列"}
+
+    def download_batch(self, items, out_dir=None, quality="best"):
+        """把用户从搜索结果点选的多个视频按序入队，最后让 Agent 汇报。"""
+        if not isinstance(items, list) or not items:
+            return {"ok": False, "message": "请先选择要下载的视频"}
+        if len(items) > 12:
+            return {"ok": False, "message": "一次最多下载 12 个视频"}
+        jobs = []
+        selected = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            url = str(it.get("url") or "").strip()
+            if not re.match(r"^https?://", url, re.I):
+                continue
+            args = {"url": url, "quality": quality or "best"}
+            if out_dir:
+                args["out_dir"] = out_dir
+            jobs.append(self._enqueue("tool", name="url_download", args=args))
+            selected.append({"title": str(it.get("title") or "未命名")[:120], "url": url})
+        if not jobs:
+            return {"ok": False, "message": "所选视频没有有效链接"}
+        titles = "；".join(x["title"] for x in selected[:8])
+        chat_id = self._enqueue(
+            "chat",
+            text="用户已选择 %d 个搜索结果并加入下载队列：%s。下载结果以上述工具结果为准，请只简短确认，不要重复下载或再次搜索。" % (
+                len(selected), titles),
+        )
+        return {"ok": True, "ids": jobs + [chat_id], "chat_id": chat_id,
+                "message": "已加入队列 %d 个下载任务" % len(jobs)}
 
     # ---- 主题 ----
     def get_theme(self):

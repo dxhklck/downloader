@@ -33,6 +33,21 @@ def test_bg_task_emits_done_on_exception():
     raise AssertionError("未收到 site_login_done 事件")
 
 
+def test_download_batch_enqueues_downloads_and_agent_report():
+    api = main.Api()
+    result = api.download_batch([
+        {"title": "视频A", "url": "https://www.bilibili.com/video/BV1"},
+        {"title": "无效", "url": "ftp://bad"},
+    ], out_dir="课程")
+    assert result["ok"] is True
+    assert len(result["ids"]) == 2  # 1 个下载 + 1 个 Agent 汇报
+    jobs = list(api._jobs.queue)
+    assert jobs[0]["name"] == "url_download"
+    assert jobs[0]["args"]["out_dir"] == "课程"
+    assert jobs[1]["kind"] == "chat"
+    assert "用户已选择" in jobs[1]["text"]
+
+
 def test_retry_tool_blocks_planning_tools():
     api = main.Api()
     assert api.retry_tool("ask_choice", {})["ok"] is False

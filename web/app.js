@@ -185,6 +185,7 @@ function searchResultsCard(data) {
   const meta = data.out_dir ? ' · 保存到 ' + data.out_dir : '';
   const rows = items.map((it, i) =>
     '<div class="search-result-row">' +
+    '<input type="checkbox" class="search-result-check" data-search-index="' + i + '" aria-label="选择">' +
     '<div class="search-result-title">' + (i + 1) + '. ' + escapeHtml(it.title || '无标题') + '</div>' +
     '<div class="search-result-meta">' + escapeHtml(it.uploader || '未知上传者') +
     (it.duration ? ' · ' + fmtDur(it.duration) : '') + '</div>' +
@@ -192,39 +193,64 @@ function searchResultsCard(data) {
     '" data-search-index="' + i + '">下载</button></div>').join('');
   div.innerHTML = '<div class="msg-avatar">助</div><div class="msg-body">' +
     '<div class="search-card"><div class="search-card-head">搜索结果：' +
-    escapeHtml(data.keyword || '') + meta + '（选一个下载）</div>' +
-    '<div class="search-results">' + rows + '</div></div></div>';
+    escapeHtml(data.keyword || '') + meta + '（勾选后可批量下载）</div>' +
+    '<div class="search-results">' + rows + '</div>' +
+    '<div class="search-actions"><button class="btn btn-primary" data-search-all>下载全部</button>' +
+    '<button class="btn btn-ghost" data-search-selected>下载所选</button></div>' +
+    '</div></div>';
   div.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-search-url]');
-    if (!btn || btn.disabled) return;
-    const item = items[Number(btn.dataset.searchIndex)];
-    if (!item || !item.url) return;
-    btn.disabled = true;
-    btn.textContent = '已加入队列';
-    downloadChosen(item.url, data.out_dir, data.quality);
+    if (btn && !btn.disabled) {
+      const item = items[Number(btn.dataset.searchIndex)];
+      if (!item || !item.url) return;
+      btn.disabled = true;
+      btn.textContent = '已加入队列';
+      downloadChosen([item], data.out_dir, data.quality, btn);
+      return;
+    }
+    const all = e.target.closest('[data-search-all]');
+    const selected = e.target.closest('[data-search-selected]');
+    if (!all && !selected) return;
+    const picked = all ? items : Array.from(div.querySelectorAll('.search-result-check:checked'))
+      .map((n) => items[Number(n.dataset.searchIndex)]).filter(Boolean);
+    if (!picked.length) {
+      addResult({ success: false, message: '请先勾选要下载的视频' });
+      return;
+    }
+    (all || selected).disabled = true;
+    downloadChosen(picked, data.out_dir, data.quality, all || selected);
   });
   $('chatLog').appendChild(div);
   scrollChat();
   saveHistory();
 }
 
-async function downloadChosen(url, outDir, quality) {
-  const args = { url };
-  if (outDir) args.out_dir = outDir;
-  if (quality) args.quality = quality;
+async function downloadChosen(picked, outDir, quality, btn) {
+  const items = picked.filter((it) => it && it.url).map((it) => ({
+    url: it.url, title: it.title || '未命名'
+  }));
+  if (!items.length) {
+    addResult({ success: false, message: '所选视频没有有效链接' });
+    if (btn) btn.disabled = false;
+    return;
+  }
   try {
-    const r = await api.retry_tool('url_download', args);
+    const r = await api.download_batch(items, outDir || '', quality || 'best');
     if (r && r.ok) {
-      const thinking = showThinking();
-      pendingJobs.add(r.id);
-      thinkingByJob.set(r.id, thinking);
+      (r.ids || []).forEach((id) => {
+        const thinking = showThinking();
+        pendingJobs.add(id);
+        thinkingByJob.set(id, thinking);
+      });
       refreshBusy();
-      addMessage('下载：' + url.slice(0, 60) + '（任务 #' + r.id + '）', 'user');
+      addMessage('下载 ' + items.length + ' 个视频（任务 #' + (r.ids || []).join(', ') + '）', 'user');
     } else {
       addResult({ success: false, message: (r && r.message) || '下载任务创建失败' });
+      if (btn) btn.disabled = false;
     }
   } catch (e) {
     addResult({ success: false, message: friendlyError(e), detail: String(e) });
+    if (btn) btn.disabled = false;
   }
 }
 

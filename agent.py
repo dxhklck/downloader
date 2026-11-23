@@ -39,6 +39,9 @@ def _normalize_result(result):
         "data": result.get("data", {}),
         "error_code": result.get("error_code") or ("ok" if success else "tool_error"),
         "retryable": bool(result.get("retryable", not success)),
+        "next_action": result.get("next_action") or (
+            "结果已展示给用户，等待用户点选；不要重复搜索或继续追问。"
+            if success and isinstance(result.get("data"), dict) and "items" in result["data"] else ""),
     }
 
 
@@ -652,6 +655,10 @@ class Agent:
         ))
         if result["success"]:
             self.emit("search_results", result["data"])
+            result["next_action"] = (
+                "候选已展示，等待用户在界面点选。现在停止调用工具，用一句话告诉用户"
+                "“已列出搜索结果，请点选要下载的视频或点下载全部”，不要再追问关键词，也不要重复搜索。"
+            )
         return result
 
     def _execute_tool(self, name, args, forced, tool_call_id, user_text=""):
