@@ -8,7 +8,8 @@ import os, sys, json, threading, queue, itertools, webview
 import config
 import tools
 import assets
-from agent import Agent
+import notify
+from agent import Agent, FUNCS
 
 
 class Api:
@@ -22,8 +23,8 @@ class Api:
         self._jobs = queue.Queue()
         self._job_ids = itertools.count(1)
         self._job_lock = threading.Lock()
-        self._queue = []
         self._current_job = None
+        self._allowed_tools = set(FUNCS)
         threading.Thread(target=self._job_worker, daemon=True).start()
 
     @staticmethod
@@ -93,26 +94,27 @@ class Api:
         return job["id"]
 
     def _run_tool(self, name, args):
-        import tools
-        if not name.startswith("_") and not hasattr(tools, name):
-            name = "tools." + name
-        fn = tools
-        for part in name.split("."):
-            if part.startswith("_"):
-                fn = None
-                break
-            fn = getattr(fn, part, None)
-            if fn is None:
-                break
+        """只执行 Agent 已声明的工具：重试入口也不绕过白名单。"""
+        fn = FUNCS.get(name)
         if not callable(fn):
             result = {"success": False, "message": f"未知工具：{name}"}
+        elif not isinstance(args, dict):
+            result = {"success": False, "message": "工具参数格式不正确"}
         else:
+            from agent import _SCHEMA_PARAMS
+            import inspect
+            accepted = _SCHEMA_PARAMS.get(name, set()) & set(inspect.signature(fn).parameters)
+            call_args = {k: v for k, v in args.items() if k in accepted}
             try:
-                result = fn(**args)
+                result = fn(**call_args)
             except Exception as e:
                 result = self._err(e)
         self._emit("tool", {"name": name, "args": args, "job_id": self._current_job["id"]})
         self._emit("result", result)
+        if ("download" in name or "random" in name) and (result.get("success") or result.get("cancelled")):
+            enabled = config.load().get("notify_on_complete", False)
+            if enabled:
+                notify.notify("视频下载助手", result.get("message", "下载已完成")[:200])
 
     def chat(self, text):
         """用户发言：进入 FIFO 队列，由单 worker 顺序执行。"""
@@ -120,8 +122,13 @@ class Api:
         return {"ok": True, "id": job_id, "message": "已加入队列"}
 
     def retry_tool(self, name, args):
-        """失败工具重试：与对话共用同一队列。"""
-        job_id = self._enqueue("tool", name=name, args=args)
+        """失败工具重试：与对话共用同一队列，禁止越权重放任意函数。"""
+        base = str(name).split(".")[-1]
+        if base not in self._allowed_tools or base == "get_state":
+            return {"ok": False, "message": f"该工具不支持重试：{name}"}
+        if not isinstance(args, dict):
+            return {"ok": False, "message": "重试参数格式不正确"}
+        job_id = self._enqueue("tool", name=base, args=args)
         return {"ok": True, "id": job_id, "message": "重试已加入队列"}
 
     # ---- 主题 ----
@@ -142,6 +149,7 @@ class Api:
         key = cfg.get("api_key", "")
         # 不回传真实 Key；前端通过 configured 判断是否已配置，留空即不修改。
         cfg.pop("api_key", None)
+        cfg["notify_on_complete"] = bool(cfg.get("notify_on_complete", False))
         cfg["providers"] = config.PROVIDERS
         cfg["configured"] = bool(key)
         return cfg

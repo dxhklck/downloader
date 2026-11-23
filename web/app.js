@@ -1,8 +1,9 @@
 // pywebview 的 js_api 在 window.pywebview.api，需等就绪
 let api = null;
 let lastLogCount = 0;
-let isBusy = false;        // 发送锁：仅本轮 chat 终结时解锁，poll 不得提前解锁
-let activeJobId = null;    // 当前 job id，done 只解锁对应轮次
+const pendingJobs = new Set();  // 已入队、尚未收到 done 的任务 id
+const thinkingByJob = new Map(); // job id -> 该任务的“思考中”占位
+let runningJobId = null;   // job_start 标记正在执行的任务
 let lastToolCall = null;   // 最近一次工具调用，供结果卡重试
 let logGen = -1;           // 日志代际号，配合后端 clear_logs 丢弃在途旧日志
 const ERR_HINT = {
@@ -182,62 +183,72 @@ async function retryResult(btn) {
   btn.disabled = true;
   try {
     const r = await api.retry_tool(lastToolCall.name, lastToolCall.args);
-    if (r && r.ok) addMessage('重试：' + lastToolCall.name, 'user');
-    else addResult(r);
+    if (r && r.ok) {
+      pendingJobs.add(r.id);
+      refreshBusy();
+      addMessage('重试：' + lastToolCall.name + '（任务 #' + r.id + '）', 'user');
+    } else {
+      addResult(r);
+    }
   } catch (e) { addResult({ success: false, message: friendlyError(e), detail: String(e) }); }
   btn.disabled = false;
 }
 
-// 思考中占位：发送后立即插入，收到首个真实回复时移除
+// 任务占位：发送后立刻显示排队中；收到首个真实回复后移除
 function showThinking() {
   const div = document.createElement('div');
   div.className = 'msg msg-agent thinking';
   div.innerHTML = '<div class="msg-avatar">助</div>' +
-    '<div class="msg-body"><div class="msg-text">思考中...</div></div>';
+    '<div class="msg-body"><div class="msg-text">排队中...</div></div>';
   $('chatLog').appendChild(div);
   scrollChat();
+  return div;
 }
-function removeThinking() {
-  $('chatLog').querySelectorAll('.msg.thinking').forEach((n) => n.remove());
+function removeThinking(node) {
+  if (node && node.parentNode) node.remove();
+  else $('chatLog').querySelectorAll('.msg.thinking').forEach((n) => n.remove());
+}
+function clearThinking(jobId) {
+  const node = thinkingByJob.get(jobId);
+  if (node) { removeThinking(node); thinkingByJob.delete(jobId); }
+}
+
+function refreshBusy() {
+  const pending = Array.from(pendingJobs);
+  const first = pending[0];
+  $('toolStatus').textContent = pending.length
+    ? '任务 #' + first + ' 处理中' + (pending.length > 1 ? '，另有 ' + (pending.length - 1) + ' 个排队' : '')
+    : '';
 }
 
 async function send() {
-  if (isBusy) return;
   const input = $('chatInput');
   const text = input.value.trim();
   if (!text) return;
   input.value = '';
-  isBusy = true;
   addMessage(text, 'user');
-  showThinking();
-  $('sendBtn').disabled = true;
-  $('toolStatus').textContent = '处理中...';
+  const thinking = showThinking();
   try {
     const r = await api.chat(text);
-    if (r && r.id) activeJobId = r.id;
-    // 后端拒绝时立即解锁，避免永久锁死
-    if (r && r.ok === false) {
-      removeThinking();
+    if (r && r.id) {
+      pendingJobs.add(r.id);
+      thinkingByJob.set(r.id, thinking);
+      refreshBusy();
+    } else if (r && r.ok === false) {
+      removeThinking(thinking);
       addResult(r);
-      isBusy = false;
-      $('sendBtn').disabled = false;
-      $('toolStatus').textContent = '';
     }
   } catch (e) {
-    removeThinking();
+    removeThinking(thinking);
     addResult({ success: false, message: friendlyError(e), detail: String(e) });
-    isBusy = false;
-    $('sendBtn').disabled = false;
-    $('toolStatus').textContent = '';
   }
 }
 
-// 本轮对话终结：解锁发送（由后端 done 事件触发，poll 不得提前解锁）
-function endTurn() {
-  removeThinking();
-  isBusy = false;
-  $('sendBtn').disabled = false;
-  $('toolStatus').textContent = '';
+// 单个任务终结：只移除对应 thinking，其他排队任务的占位保留
+function endTurn(jobId) {
+  pendingJobs.delete(jobId);
+  clearThinking(jobId);
+  refreshBusy();
 }
 
 // 轮询后端事件
@@ -246,12 +257,18 @@ async function poll() {
     const events = await api.poll();
     events.forEach((ev) => {
       switch (ev.event) {
+        case 'job_start':
+          runningJobId = ev.data && ev.data.id;
+          break;
         case 'msg':
-          removeThinking();
+          if (runningJobId) clearThinking(runningJobId);
+          else removeThinking();
           if (ev.data !== '思考中...' && ev.data) addMessage(ev.data, 'agent');
           break;
         case 'tool':
-          removeThinking();
+          if (ev.data && ev.data.job_id) clearThinking(ev.data.job_id);
+          else if (runningJobId) clearThinking(runningJobId);
+          else removeThinking();
           addToolStatus(ev.data.name, ev.data.args);
           break;
         case 'result':
@@ -259,7 +276,8 @@ async function poll() {
           addResult(ev.data);
           break;
         case 'done':
-          if (activeJobId === null || !ev.data || ev.data.id === activeJobId) endTurn();
+          if (ev.data && ev.data.id) endTurn(ev.data.id);
+          else if (ev.data && ev.data.kind === 'chat' && runningJobId) endTurn(runningJobId);
           break;
         case 'xhs_login_done':
         case 'site_login_done':
@@ -356,6 +374,7 @@ async function openSettings() {
   $('apiKeyInput').value = '';  // 后端不回传真实 Key；留空表示不修改
   $('apiKeyInput').placeholder = cfg.configured ? '已配置，留空表示不修改' : '粘贴 API Key';
   $('modelInput').value = cfg.model || '';
+  $('notifyOnComplete').checked = !!cfg.notify_on_complete;
   $('proxyInput').value = cfg.proxy || '';
   $('xhsCookieInput').value = cfg.xhs_cookie || '';
   $('siteUrlInput').value = cfg.last_site || '';
@@ -415,7 +434,8 @@ async function saveSettings() {
     model: $('modelInput').value.trim(),
     proxy: $('proxyInput').value.trim(),
     xhs_cookie: $('xhsCookieInput').value.trim(),
-    last_site: $('siteUrlInput').value.trim()
+    last_site: $('siteUrlInput').value.trim(),
+    notify_on_complete: $('notifyOnComplete').checked
   };
   try { showTest(await api.save_config(JSON.stringify(cfg))); }
   catch (e) { showTest({ ok: false, message: friendlyError(e), detail: String(e) }); }
