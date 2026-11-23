@@ -532,6 +532,26 @@ function setSettingsTab(name) {
   document.querySelectorAll('[data-settings-panel]').forEach((panel) => {
     panel.classList.toggle('hidden', panel.dataset.settingsPanel !== name);
   });
+  $('testBtn').classList.toggle('hidden', name !== 'model');
+  $('saveBtn').classList.toggle('hidden', name !== 'model');
+}
+
+// 底部按钮的反馈写入当前标签页：模型页写 testResult，备份页写 backupResult，
+// 其它页写各自的结果区；避免点了按钮却看不到任何反馈。
+function currentSettingsFeedback() {
+  const active = document.querySelector('[data-settings-tab].active');
+  const tab = active ? active.dataset.settingsTab : 'model';
+  if (tab === 'backup') return $('backupResult');
+  return $('testResult');
+}
+
+function showFeedback(r) {
+  const box = currentSettingsFeedback();
+  if (!box) return;
+  const msg = r && r.ok ? r.message : friendlyError(r && (r.detail || r.message));
+  box.textContent = msg;
+  box.className = 'test-result ' + (r && r.ok ? 'ok' : 'fail');
+  box.title = r && !r.ok && r.detail ? r.detail : '';
 }
 
 async function loadVersionInfo() {
@@ -592,9 +612,10 @@ async function refreshLoginStatus() {
 }
 
 function showBackupResult(r) {
+  // 后端消息直接展示，避免 “配置格式不是有效 JSON” 被通用文案吞掉。
   const box = $('backupResult');
   if (!box) return;
-  box.textContent = r.ok ? r.message : friendlyError(r.detail || r.message);
+  box.textContent = r.ok ? r.message : (r.detail || r.message || '导入失败');
   box.className = 'test-result ' + (r.ok ? 'ok' : 'fail');
   box.title = !r.ok && r.detail ? r.detail : '';
 }
@@ -603,13 +624,15 @@ async function exportConfig() {
   try {
     const r = await api.export_config();
     const text = JSON.stringify(r.config, null, 2);
+    const input = $('importConfigInput');
+    if (input) input.value = text;  // 同时显示在页面上，避免找不到下载文件
     const blob = new Blob([text], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = 'downloader-config.json';
     a.click();
     URL.revokeObjectURL(a.href);
-    showBackupResult({ ok: r.ok, message: '配置已导出，API Key / Cookie 未包含' });
+    showBackupResult({ ok: r.ok, message: '已导出配置（不含 API Key / Cookie）：已下载 downloader-config.json，并填入下方文本框，可直接复制或另存' });
   } catch (e) { showBackupResult({ ok: false, message: friendlyError(e), detail: String(e) }); }
 }
 
@@ -689,12 +712,7 @@ async function downloadUpdate() {
 }
 
 function showTest(r) {
-  const msg = r.ok ? r.message : friendlyError(r.detail || r.message);
-  $('testResult').textContent = msg;
-  $('testResult').className = 'test-result ' + (r.ok ? 'ok' : 'fail');
-  if (!r.ok && r.detail) {
-    $('testResult').title = r.detail;
-  }
+  showFeedback(r);
 }
 
 async function saveSettings() {
