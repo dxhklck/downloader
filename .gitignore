@@ -7,6 +7,7 @@ cookie*.txt
 *_profile/
 xhs_profile/
 asset_cache.json
+conversations/
 数据目录.txt
 
 # ===== 视频/下载数据 =====

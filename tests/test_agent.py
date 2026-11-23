@@ -16,6 +16,22 @@ def test_system_prompt_enforces_platform_routing():
     assert "B站" in douyin_desc and "不能用" in douyin_desc
 
 
+def test_parse_intent_extracts_download_slots():
+    intent = agent.parse_intent("B站搜信息科技互联网，下10个1080p到课程目录")
+    assert intent["action"] == "search_download"
+    assert intent["platform"] == "bili"
+    assert "信息科技互联网" in intent["keyword"]
+    assert intent["count"] == 10
+    assert intent["quality"] == "1080"
+    assert intent["out_dir"] == "课程"
+
+
+def test_parse_intent_flags_missing_keyword():
+    intent = agent.parse_intent("帮我收集一些视频")
+    assert intent["action"] == "search_download"
+    assert "keyword" in intent["missing"]
+
+
 def test_forced_platform_detection():
     assert agent._forced_platform("B站随机下一首") == "bili_"
     assert agent._forced_platform("哔哩哔哩下载") == "bili_"
@@ -183,6 +199,28 @@ def test_malformed_arguments_are_rejected(monkeypatch):
     a.chat("进度")
     results = [data for event, data in events if event == "result"]
     assert results[0]["success"] is False
+
+
+def test_dynamic_context_includes_recent_results(monkeypatch):
+    monkeypatch.setattr(agent.tools, "get_state", lambda: {
+        "task": "", "done": 0, "total": 0, "queue": [],
+        "recent_results": [{"success": True, "message": "已下载：测试视频"}],
+    })
+    monkeypatch.setattr(agent.tools, "get_login_status", lambda: {})
+    text = agent._dynamic_context()
+    assert "最近任务结果" in text
+    assert "已下载：测试视频" in text
+
+
+def test_make_summary_is_structured():
+    summary = agent._make_summary([
+        {"role": "user", "content": "找课程视频"},
+        {"role": "tool", "content": '{"success": true, "message": "找到 3 个"}'},
+        {"role": "assistant", "content": "已列出候选"},
+    ])
+    assert "用户诉求" in summary
+    assert "工具结果" in summary
+    assert "助手结论" in summary
 
 
 def test_dynamic_context_has_no_secrets(monkeypatch):

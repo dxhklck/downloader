@@ -10,11 +10,13 @@ from openai import OpenAI
 
 import config
 import tools
+import conversation_store
 
 
 # 历史裁剪阈值：超过后保留摘要 + 最近若干轮完整对话。
 MAX_HISTORY_GROUPS = 8
 MAX_HISTORY_CHARS = 16000
+MAX_SUMMARY_CHARS = 1200
 MAX_ANSWER_WAIT_SEC = 120
 
 
@@ -154,14 +156,26 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "url_info",
+            "description": "预探测视频链接是单视频、合集/列表还是直播；用户发链接但意图不明确时先调用，不要直接下载整个合集。",
+            "parameters": {
+                "type": "object",
+                "properties": {"url": {"type": "string", "description": "完整视频网页链接"}},
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_videos",
             "description": "按关键词跨平台搜索视频候选（B站/YouTube等），只列出结果不下载。用户说收集/找/搜某些主题或关键词的视频时用；结果会推给界面让用户点选下载。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "keyword": {"type": "string", "description": "搜索关键词，如 信息科技 互联网"},
-                    "platform": {"type": "string", "enum": ["all", "bili", "youtube"],
-                                 "description": "平台：all 默认、bili 哔哩哔哩、youtube；用户没指定就用 all"},
+                    "platform": {"type": "string", "enum": ["all", "bili", "youtube", "douyin"],
+                                 "description": "平台：all 默认、bili 哔哩哔哩、youtube、douyin（抖音不支持关键词，会给出提示）；用户没指定就用 all"},
                     "count": {"type": "integer", "description": "候选数量，默认8，最多12"},
                     "out_dir": {"type": "string", "description": "可选：下载时保存的相对目录，界面会使用"},
                     "quality": {"type": "string", "enum": ["best", "1080", "720"], "description": "下载画质，默认 best"},
@@ -367,6 +381,7 @@ FUNCS = {
     "clean_temp": tools.clean_temp,
     "get_state": tools.get_state,
     "url_download": tools.url_download,
+    "url_info": tools.url_info,
     "search_videos": tools.search_videos,
     "make_plan": None,
     "ask_choice": None,
@@ -387,7 +402,7 @@ FUNCS = {
 CONFIRM_BEFORE = {"organize_apply"}
 
 # 这些工具由 Agent 自己处理，没有可重放的外部副作用。
-NO_RETRY_TOOLS = {"get_state", "make_plan", "ask_choice"}
+NO_RETRY_TOOLS = {"get_state", "make_plan", "ask_choice", "url_info"}
 
 # 选择题不能诱导用户提供敏感信息；命中直接拒绝，不发起等待事件。
 _SENSITIVE_CHOICE_WORDS = ("api key", "apikey", "cookie", "密码", "token", "密钥")
@@ -405,7 +420,7 @@ _PLATFORM_PREFIXES = (
     (("b站", "哔哩哔哩", "bilibili"), "bili_"),
     (("抖音", "douyin"), "douyin_"),
 )
-_PLATFORM_TOOLS = {"bili_status", "bili_download", "douyin_random", "douyin_login", "url_download", "search_videos"}
+_PLATFORM_TOOLS = {"bili_status", "bili_download", "douyin_random", "douyin_login", "url_download", "url_info", "search_videos"}
 
 
 def _forced_platform(text):
@@ -421,12 +436,62 @@ def _has_video_link(text):
     return bool(re.search(r"https?://", str(text or ""), re.I))
 
 
+_INTENT_RE = re.compile(r"(?:搜索|搜|找|收集|搜集|下一些|下载一些|来一些)(.*?)(?:的视频|视频|课程)?(?=[，,。！!？?；;]|$)")
+_PLATFORM_WORDS = (("bili", ("b站", "哔哩哔哩", "bilibili")),
+                   ("douyin", ("抖音", "douyin")),
+                   ("youtube", ("youtube", "油管")))
+_COUNT_RE = re.compile(r"(\d+)\s*(?:个|部|条|集)")
+
+
+def parse_intent(text, history=None):
+    """规则解析下载意图；不作为最终决定，只作为稳定上下文喂给模型。"""
+    raw = str(text or "").strip()
+    low = raw.lower()
+    platform = ""
+    for key, words in _PLATFORM_WORDS:
+        if any(w in low for w in words):
+            platform = key
+            break
+    match = _INTENT_RE.search(raw)
+    keyword = ""
+    if match:
+        keyword = match.group(1)
+        keyword = re.sub(r"^(一些|一些个|几个|相关|有关|的)+", "", keyword).strip()
+        keyword = re.sub(r"(相关|有关|方面|之类)$", "", keyword).strip()
+    count_match = _COUNT_RE.search(raw)
+    count = int(count_match.group(1)) if count_match else 0
+    quality = "1080" if "1080" in low else "720" if "720" in low else "best"
+    out_dir = ""
+    dir_match = re.search(r"到\s*([^\s，,。；;]+?)(?:目录|文件夹)(?=[，,。；;]|$)", raw)
+    if dir_match:
+        out_dir = dir_match.group(1).strip("的了着")
+    if _has_video_link(raw):
+        action = "download_link"
+    elif keyword or ("搜" in raw or "找" in raw or "收集" in raw or "搜集" in raw):
+        action = "search_download"
+    elif "随机" in raw or "刷" in raw:
+        action = "random_download"
+    elif re.search(r"第\s*\d+\s*到\s*\d+\s*集|\d+[-~到]\d+集", raw):
+        action = "episode_download"
+    else:
+        action = "unknown"
+    missing = []
+    if action == "search_download" and not keyword:
+        missing.append("keyword")
+    slots = {"action": action, "platform": platform or "all", "keyword": keyword,
+             "count": count or 8, "quality": quality, "out_dir": out_dir,
+             "has_link": _has_video_link(raw), "missing": missing}
+    if platform == "douyin" and action == "search_download":
+        slots["note"] = "抖音不支持关键词搜索，建议随机下载或发链接"
+    return slots
+
+
 def _tool_forbidden(forced, name, text=""):
     if not forced or name not in _PLATFORM_TOOLS:
         return False
     if name == "url_download" and _has_video_link(text):
         return False
-    if name == "search_videos":
+    if name in ("search_videos", "url_info"):
         return False
     return not name.startswith(forced)
 
@@ -442,7 +507,7 @@ SYSTEM = """你是视频下载助手。用户用中文告诉你要下载什么�
 - 两个平台都没提 → 按默认规则（下面第 3、4 条）处理。
 
 默认规则：
-1. 用户给出 http:// 或 https:// 开头的网页链接（YouTube、B站、抖音、微博等任意网站）→ 一律调 url_download，把完整链接原样传给 url 参数；即使句子里提到 B站/抖音也同样用链接下载，不要调用按集或随机工具。用户说放到某目录 → 传 out_dir（相对资产根目录）；没说目录就不传 out_dir。
+1. 用户给出 http:// 或 https:// 开头的网页链接（YouTube、B站、抖音、微博等任意网站）→ 一律用链接工具；即使句子里提到 B站/抖音也不要调用按集或随机工具。用户只给链接、没说下单个还是合集 → 先 url_info 探测；探测为合集要先问用户下载全部还是前 N 个。用户明确说“下载这个视频/这条” → 直接 url_download。用户说放到某目录 → 传 out_dir；没说就不传。
 2. 用户说下载番剧/集数（没给链接）→ 调 bili_download；集数范围从用户的话里提取。若只说剧名没给范围，先调 bili_status 查总集数再决定，不要臆测数字。
 3. 用户要按主题/关键词收集、搜索、找视频（如"信息科技课程""互联网方面"）→ 调 search_videos，平台按用户说的选；用户没说平台就 platform='all'。搜索结果交给界面让用户点选下载，不要再追问关键词细节。
 4. 用户说随机刷/刷到什么下什么（没给链接、没主题关键词）→ 调 douyin_random，数量从话里提取。
@@ -461,6 +526,8 @@ SYSTEM = """你是视频下载助手。用户用中文告诉你要下载什么�
 14. 每次只返回一个工具调用，等结果后再决定下一步。任务完成后用简洁中文汇报结果。
 15. 如果工具返回失败（success=false），如实告诉用户原因，不要假装成功。
 16. 用户表达模糊时不要连续追问：有主题就先 search_videos 给候选；有链接就直接 url_download；只有完全没有可执行线索时才用 ask_choice 给2-4个选项。
+17. 抖音不支持关键词搜索；用户要抖音关键词时，说明暂不支持并建议“随机刷N个”或发具体链接，不要调用 search_videos(platform='douyin')。
+18. 用户问“下载完了吗/上次那些呢”时，先看动态上下文的“最近任务结果”，直接汇报，不要重复下载。
 """
 
 
@@ -480,6 +547,12 @@ def _dynamic_context():
         parts.append("当前任务：%s；进度 %s/%s；运行中：%s" % (
             _shorten(state.get("task") or "无"), state.get("done", 0),
             state.get("total", 0), bool(state.get("running"))))
+        recent = state.get("recent_results") or []
+        if recent:
+            parts.append("最近任务结果：" + "；".join(
+                "%s %s" % ("完成" if r.get("success") else "取消" if r.get("cancelled") else "失败",
+                           _shorten(r.get("message"), 80))
+                for r in recent[-3:]))
         queue = state.get("queue") or []
         if queue:
             parts.append("排队任务：" + "；".join(
@@ -534,12 +607,31 @@ def _history_groups(messages):
 
 
 def _make_summary(history):
-    lines = []
+    """结构化摘要：用户诉求、工具结果、助手结论分开，避免只留一串聊天文本。"""
+    wants, outcomes, conclusions = [], [], []
     for msg in history:
-        content = _message_dict(msg).get("content")
-        if isinstance(content, str) and content.strip():
-            lines.append("%s: %s" % (msg.get("role"), _shorten(content, 120)))
-    return "；".join(lines[-24:])[:1200]
+        data = _message_dict(msg)
+        role = data.get("role")
+        content = data.get("content")
+        if role == "user" and isinstance(content, str) and content.strip():
+            wants.append(_shorten(content, 120))
+        elif role == "tool" and isinstance(content, str) and content.strip():
+            try:
+                payload = json.loads(content)
+                brief = payload.get("message") or payload.get("data", {}).get("message")
+            except (ValueError, TypeError):
+                brief = content
+            outcomes.append(_shorten(brief, 120))
+        elif role == "assistant" and isinstance(content, str) and content.strip():
+            conclusions.append(_shorten(content, 120))
+    parts = []
+    if wants:
+        parts.append("用户诉求：" + "；".join(wants[-8:]))
+    if outcomes:
+        parts.append("工具结果：" + "；".join(outcomes[-8:]))
+    if conclusions:
+        parts.append("助手结论：" + "；".join(conclusions[-8:]))
+    return "。".join(parts)[:MAX_SUMMARY_CHARS]
 
 
 def _clip_history(history):
@@ -563,6 +655,7 @@ class Agent:
         self.client = None
         self.model = None
         self.history = []
+        self.conversation_id = conversation_store.new_id()
         self.plan = []
         self._choice_lock = threading.Lock()
         self._choices = {}
@@ -580,6 +673,26 @@ class Agent:
     def configured(self):
         key, _, _ = config.llm_params()
         return bool(key)
+
+    def load_conversation(self, cid):
+        self.conversation_id = str(cid or conversation_store.new_id())
+        self.history = _clip_history(conversation_store.load(self.conversation_id))
+        self.plan = []
+        return {"ok": True, "id": self.conversation_id, "messages": len(self.history)}
+
+    def new_conversation(self):
+        return self.load_conversation(conversation_store.new_id())
+
+    def delete_conversation(self, cid):
+        if not conversation_store.delete(cid):
+            return {"ok": False, "message": "会话不存在或删除失败"}
+        if str(cid) == self.conversation_id:
+            self.new_conversation()
+        return {"ok": True, "message": "会话已删除"}
+
+    def list_conversations(self):
+        return {"ok": True, "items": conversation_store.list_all(),
+                "current": self.conversation_id}
 
     def answer_choice(self, answer_id, value):
         """前端选项回调：唤醒等待中的 ask_choice。"""
@@ -646,13 +759,26 @@ class Agent:
         return result
 
     def _search_videos(self, args):
-        result = _normalize_result(tools.search_videos(
-            keyword=args.get("keyword"),
-            platform=args.get("platform", "all"),
-            count=args.get("count", 8),
-            out_dir=args.get("out_dir"),
-            quality=args.get("quality", "best"),
-        ))
+        keyword = str(args.get("keyword") or "").strip()
+
+        def run(term):
+            return _normalize_result(tools.search_videos(
+                keyword=term,
+                platform=args.get("platform", "all"),
+                count=args.get("count", 8),
+                out_dir=args.get("out_dir"),
+                quality=args.get("quality", "best"),
+            ))
+
+        result = run(keyword)
+        # 搜索失败时只换更短关键词重试一次；平台不支持/参数错误不重试。
+        if not result["success"] and result["error_code"] == "search_failed" and len(keyword) > 4:
+            short = " ".join(keyword.split()[:2])[:40]
+            if short and short != keyword:
+                self.emit("status", "搜索未成功，正在用更短关键词重试…")
+                result = run(short)
+                if result["success"]:
+                    result["message"] += "（已自动缩短关键词重试）"
         if result["success"]:
             self.emit("search_results", result["data"])
             result["next_action"] = (
@@ -714,9 +840,15 @@ class Agent:
             return
         self._refresh_client()
         forced = _forced_platform(user_text)
+        intent = parse_intent(user_text, self.history)
+        if intent["action"] == "search_download" and not intent["keyword"]:
+            self.emit("msg", "我可以帮你搜索下载，但还缺一个主题关键词（比如“信息科技”“搞笑”“唱歌”）。你告诉我关键词后我直接搜。")
+            return
         messages = [
             {"role": "system", "content": SYSTEM},
             {"role": "system", "content": _dynamic_context()},
+            {"role": "system", "content": "本轮规则意图解析：" + json.dumps(intent, ensure_ascii=False) +
+             "。以用户原话为准；缺项已用默认值时不要再追问。"},
             *self.history,
             {"role": "user", "content": user_text},
         ]
@@ -776,3 +908,5 @@ class Agent:
             self.emit("msg", "（已执行多轮工具调用，如有未完成请再说一次）")
 
         self.history = _clip_history(messages[2:])
+        conversation_store.save(self.conversation_id, self.history,
+                                title=_shorten(user_text, 40))

@@ -16,6 +16,7 @@ _RES_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 _APP_DIR = os.path.dirname(sys.executable) if _IS_FROZEN else os.path.dirname(os.path.abspath(__file__))
 _HERE = _APP_DIR
 CONFIG_FILE = os.path.join(_APP_DIR, "config.json")
+CONVERSATIONS_DIR = os.path.join(_APP_DIR, "conversations")
 
 
 def _read_config_raw():

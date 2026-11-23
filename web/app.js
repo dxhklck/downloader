@@ -42,9 +42,10 @@ function scrollChat() {
   log.scrollTop = log.scrollHeight;
 }
 
-// ---- 对话历史持久化（localStorage）----
+// ---- 对话显示缓存（服务端会话为准；localStorage 只做当前显示恢复）----
 const HISTORY_KEY = 'downloader_chat_history';
 const HISTORY_MAX = 200;
+let currentConversationId = null;
 
 function saveHistory() {
   try {
@@ -52,13 +53,13 @@ function saveHistory() {
       .filter((n) => !n.classList.contains('thinking'))
       .slice(-HISTORY_MAX)
       .map((n) => ({ html: n.outerHTML }));
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(msgs));
+    localStorage.setItem(HISTORY_KEY + ':' + (currentConversationId || 'default'), JSON.stringify(msgs));
   } catch (e) { /* 隐私模式或空间不足时静默跳过 */ }
 }
 
-function restoreHistory() {
+function restoreHistory(cid) {
   try {
-    const raw = localStorage.getItem(HISTORY_KEY);
+    const raw = localStorage.getItem(HISTORY_KEY + ':' + (cid || currentConversationId || 'default'));
     if (!raw) return false;
     const msgs = JSON.parse(raw);
     if (!Array.isArray(msgs) || !msgs.length) return false;
@@ -75,9 +76,62 @@ function restoreHistory() {
 }
 
 function clearHistory() {
-  try { localStorage.removeItem(HISTORY_KEY); } catch (e) {}
+  try { localStorage.removeItem(HISTORY_KEY + ':' + (currentConversationId || 'default')); } catch (e) {}
   $('chatLog').innerHTML = '';
   saveHistory();
+}
+
+async function refreshConversations(preferredId) {
+  const select = $('conversationSelect');
+  if (!select) return;
+  try {
+    const r = await api.list_conversations();
+    const items = (r && r.items) || [];
+    currentConversationId = preferredId || (r && r.current) || (items[0] && items[0].id) || null;
+    select.innerHTML = items.length
+      ? items.map((c) => '<option value="' + escapeHtml(c.id) + '">' +
+          escapeHtml(c.title || '未命名对话') + '（' + (c.messages || 0) + '）</option>').join('')
+      : '<option value="">新对话</option>';
+    if (currentConversationId) select.value = currentConversationId;
+  } catch (e) { console.error('会话列表加载失败', e); }
+}
+
+async function newConversation() {
+  try {
+    const r = await api.new_conversation();
+    currentConversationId = r.id;
+    clearHistory();
+    await refreshConversations(r.id);
+    addMessage('已开启新对话。', 'agent');
+  } catch (e) { addResult({ success: false, message: friendlyError(e), detail: String(e) }); }
+}
+
+async function switchConversation(cid) {
+  if (!cid) return;
+  try {
+    const r = await api.switch_conversation(cid);
+    currentConversationId = r.id;
+    clearHistory();
+    restoreHistory(r.id);
+    await refreshConversations(r.id);
+  } catch (e) { addResult({ success: false, message: friendlyError(e), detail: String(e) }); }
+}
+
+async function deleteConversation() {
+  const cid = $('conversationSelect').value;
+  if (!cid) return;
+  if (!confirm('删除这个会话？界面显示也会清空，服务端上下文一并删除。')) return;
+  try {
+    const r = await api.delete_conversation(cid);
+    if (!r || !r.ok) throw new Error((r && r.message) || '删除失败');
+    try { localStorage.removeItem(HISTORY_KEY + ':' + cid); } catch (e) {}
+    await refreshConversations();
+    if (!currentConversationId) await newConversation();
+    else {
+      clearHistory();
+      restoreHistory(currentConversationId);
+    }
+  } catch (e) { addResult({ success: false, message: friendlyError(e), detail: String(e) }); }
 }
 
 function addMessage(text, who) {
@@ -1066,8 +1120,11 @@ onReady(async () => {
     catch (e) { $('assetFooter').textContent = '复制失败：' + friendlyError(e); }
   });
   $('assetDeleteSelected').addEventListener('click', () => deleteAssets(selectedAssets()));
-  restoreHistory();
+  refreshConversations();
   $('clearChatBtn').addEventListener('click', clearHistory);
+  $('newConversationBtn').addEventListener('click', newConversation);
+  $('deleteConversationBtn').addEventListener('click', deleteConversation);
+  $('conversationSelect').addEventListener('change', (e) => switchConversation(e.target.value));
   $('cancelTaskBtn').addEventListener('click', async () => {
     try {
       const r = await api.cancel_task();

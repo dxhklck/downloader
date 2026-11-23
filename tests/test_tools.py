@@ -56,6 +56,45 @@ def test_url_download_rejects_unsafe_directory(tmp_path, monkeypatch):
     assert result["success"] is False
 
 
+def test_url_info_detects_playlist(monkeypatch):
+    import sys
+    import types
+
+    class FakeYdl:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download=False):
+            return {"title": "合集", "entries": [{}, {}], "webpage_url": url}
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FakeYdl))
+    result = tools.url_info("https://www.bilibili.com/video/BV1")
+    assert result["success"] is True
+    assert result["data"]["kind"] == "playlist"
+    assert result["data"]["count"] == 2
+    assert "合集" in result["data"]["next_action"]
+
+
+def test_search_videos_rejects_douyin_keyword_search():
+    result = tools.search_videos("测试", platform="douyin")
+    assert result["success"] is False
+    assert result["error_code"] == "unsupported_search_platform"
+
+
+def test_remember_result_keeps_recent_summary():
+    tools.STATE["recent_results"] = []
+    tools.remember_result({"success": True, "message": "已下载测试视频"}, "url_download")
+    state = tools.get_state()
+    assert state["recent_results"][-1]["tool"] == "url_download"
+    assert state["recent_results"][-1]["success"] is True
+
+
 def test_search_videos_returns_candidates_without_download(monkeypatch):
     import sys
     import types

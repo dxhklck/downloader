@@ -124,6 +124,7 @@ class Api:
                                  "error_code": result.get("error_code"),
                                  "retryable": result.get("retryable", not result.get("success"))})
         self._emit("result", result)
+        tools.remember_result(result, name)
         if ("download" in name or "random" in name) and (result.get("success") or result.get("cancelled")):
             enabled = config.load().get("notify_on_complete", False)
             if enabled:
@@ -137,6 +138,19 @@ class Api:
     def answer_choice(self, answer_id, value):
         """前端选择题回调：把用户选择送回等待中的 Agent 工具。"""
         return self.agent.answer_choice(answer_id, value)
+
+    # ---- 会话管理 ----
+    def list_conversations(self):
+        return self.agent.list_conversations()
+
+    def new_conversation(self):
+        return self.agent.new_conversation()
+
+    def switch_conversation(self, cid):
+        return self.agent.load_conversation(cid)
+
+    def delete_conversation(self, cid):
+        return self.agent.delete_conversation(cid)
 
     def confirm_organize(self, preview_id, confirmed=False):
         """批量整理确认：未确认时不执行；确认后走队列重放预览 id。"""

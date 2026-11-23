@@ -15,7 +15,7 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 
 # 任务状态（全局，界面轮询用）
 STATE = {"running": False, "task": "", "done": 0, "total": 0, "logs": [],
          "log_gen": 0, "cancelled": False, "episodes": {}, "attempts": {},
-         "queue": [], "current_job": None}
+         "queue": [], "current_job": None, "recent_results": []}
 STATE_LOCK = threading.Lock()
 
 # 通用站点登录：后台线程持有浏览器，前端点"完成登录"置 done 标志
@@ -88,7 +88,27 @@ def _log(msg):
 
 def get_state():
     with STATE_LOCK:
-        return dict(STATE, logs=list(STATE["logs"]))
+        return dict(STATE, logs=list(STATE["logs"]),
+                    recent_results=list(STATE["recent_results"]))
+
+
+def remember_result(result, tool_name=""):
+    """记录最近工具结果，供下一轮 Agent 主动汇报；只存轻量摘要。"""
+    if not isinstance(result, dict):
+        return
+    message = str(result.get("message") or "")[:240]
+    if not message:
+        return
+    item = {
+        "tool": str(tool_name or "")[:60],
+        "success": bool(result.get("success")),
+        "cancelled": bool(result.get("cancelled")),
+        "message": message,
+        "time": time.time(),
+    }
+    with STATE_LOCK:
+        STATE["recent_results"].append(item)
+        STATE["recent_results"] = STATE["recent_results"][-8:]
 
 
 def clear_logs():
@@ -1324,6 +1344,42 @@ def _verify_merge(path):
         return False, f"校验异常({str(e)[:60]})"
 
 
+def url_info(url):
+    """预探测链接：只读取元信息，不下载；区分单视频/播放列表/直播/需要登录。"""
+    try:
+        import yt_dlp
+    except ImportError:
+        return _fail("缺少 yt-dlp 组件，无法探测链接", error_code="probe_failed")
+    if not isinstance(url, str) or not re.match(r"^https?://", url.strip(), re.I):
+        return _fail("请提供有效的 http/https 链接", error_code="bad_arguments")
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True,
+            "extract_flat": True, "socket_timeout": 30, "retries": 1}
+    px = config.proxy_url() or config.system_proxy_url()
+    if px:
+        opts["proxy"] = px
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url.strip(), download=False) or {}
+        entries = info.get("entries")
+        kind = "playlist" if entries is not None else "live" if info.get("live_status") == "is_live" else "video"
+        item = {
+            "kind": kind, "title": str(info.get("title") or "")[:160],
+            "webpage_url": str(info.get("webpage_url") or url.strip())[:500],
+            "duration": int(info.get("duration") or 0),
+            "count": len(list(entries)) if entries is not None else 1,
+            "need_login": bool(info.get("login_required") or info.get("age_limit")),
+            "extractor": str(info.get("extractor_key") or "")[:60],
+        }
+        next_action = ("这是合集/列表，请先问用户要下载全部还是前 N 个"
+                       if kind == "playlist" else "这是单视频，可直接 url_download")
+        return _ok("链接探测完成：" + (item["title"] or "未命名"), **item,
+                   next_action=next_action)
+    except Exception as e:
+        text = str(e).lower()
+        code = "login_required" if "login" in text else "probe_failed"
+        return _fail("链接探测失败：" + str(e)[:150], error_code=code)
+
+
 def search_videos(keyword, platform="all", count=8, out_dir=None, quality="best"):
     """按关键词搜索视频，只返回候选列表，不下载；out_dir/quality 原样回传供界面下载用。"""
     try:
@@ -1338,6 +1394,11 @@ def search_videos(keyword, platform="all", count=8, out_dir=None, quality="best"
     except (TypeError, ValueError):
         cap = 8
     key = str(platform or "all").strip().lower()
+    # yt-dlp 的 Douyin extractor 未提供 SEARCH_KEY，不能构造 douyinsearch:N。
+    # 抖音保持原有随机下载路径；这里不假装支持搜索。
+    if key in ("douyin", "dy", "抖音"):
+        return _fail("抖音暂不支持关键词搜索，请用“随机刷N个”或发具体链接",
+                     error_code="unsupported_search_platform")
     prefix = {"bili": "bilisearch", "bilibili": "bilisearch", "b站": "bilisearch",
               "youtube": "ytsearch", "yt": "ytsearch"}.get(key, "ytsearch")
     opts = {
