@@ -12,12 +12,7 @@
   <!-- 顶部栏 -->
   <header class="topbar">
     <div class="brand">
-      <svg class="brand-logo" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" aria-label="视频下载助手">
-        <rect x="0" y="0" width="32" height="32" rx="8" fill="var(--primary)"/>
-        <path d="M12 10 L12 20 L21 15 Z" fill="var(--on-primary)"/>
-        <path d="M8 15 L8 23 L24 23 L24 15" fill="none" stroke="var(--on-primary)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
-        <path d="M16 20 L16 26 M12.5 22.5 L16 26 L19.5 22.5" fill="none" stroke="var(--on-primary)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
-      </svg>
+      <img class="brand-logo" src="favicon.png" alt="视频下载助手 Logo">
       <span>视频下载助手</span>
     </div>
     <div class="topbar-right">
@@ -50,6 +45,7 @@
           </div>
         </div>
       </div>
+      <div id="choiceCard" class="choice-card hidden"></div>
       <div class="chat-input-wrap">
         <div id="toolStatus" class="tool-status"></div>
         <div class="chat-input-row">
@@ -132,11 +128,12 @@
           <button id="assetSelectAll" class="btn btn-ghost">全选本页</button>
           <button id="assetCopyPaths" class="btn btn-ghost">复制路径</button>
           <button id="assetExportCsv" class="btn btn-ghost">导出 CSV</button>
+          <button id="assetDeleteSelected" class="btn btn-ghost btn-danger">删除所选</button>
         </div>
       </div>
       <div class="asset-table-wrap">
         <table class="asset-table">
-          <thead><tr><th>选</th><th>文件名</th><th>分类</th><th>大小</th><th>时长</th><th>修改日期</th></tr></thead>
+          <thead><tr><th>选</th><th>文件名</th><th>分类</th><th>大小</th><th>时长</th><th>修改日期</th><th>操作</th></tr></thead>
           <tbody id="assetRows"></tbody>
         </table>
       </div>
@@ -144,76 +141,143 @@
     </section>
   </div>
 
+  <!-- 应用内确认弹窗 -->
+  <div id="confirmOverlay" class="confirm-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+    <div class="confirm-box">
+      <h3 id="confirmTitle">确认删除</h3>
+      <p id="confirmMessage"></p>
+      <div class="settings-actions">
+        <button id="confirmCancel" class="btn btn-ghost">取消</button>
+        <button id="confirmOk" class="btn btn-danger">确认删除</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 设置抽屉 -->
   <div id="settingsOverlay" class="overlay hidden">
     <div class="settings-panel">
       <div class="settings-head">
-        <h2>设置</h2>
-        <button id="closeSettings" class="icon-btn">✕</button>
+        <div>
+          <h2>设置</h2>
+          <span class="settings-sub">模型、登录、备份与版本信息</span>
+        </div>
+        <button id="closeSettings" class="icon-btn" aria-label="关闭设置">✕</button>
+      </div>
+      <div class="settings-tabs" role="tablist" aria-label="设置分类">
+        <button class="settings-tab active" data-settings-tab="model" role="tab" aria-selected="true">模型</button>
+        <button class="settings-tab" data-settings-tab="login" role="tab" aria-selected="false">登录</button>
+        <button class="settings-tab" data-settings-tab="backup" role="tab" aria-selected="false">备份</button>
+        <button class="settings-tab" data-settings-tab="about" role="tab" aria-selected="false">关于</button>
       </div>
       <div class="settings-body">
-        <label class="field">
-          <span class="field-label">模型供应商</span>
-          <select id="providerSelect"></select>
-        </label>
-        <label class="field">
-          <span class="field-label">API Key</span>
-          <input id="apiKeyInput" type="password" placeholder="粘贴 API Key（仅存本地）">
-          <span class="field-hint">智谱 glm-4-flash 免费，去 open.bigmodel.cn 申请</span>
-        </label>
-        <label class="field">
-          <span class="field-label">模型名（可选）</span>
-          <input id="modelInput" type="text" placeholder="留空用默认模型">
-        </label>
-        <label class="field checkbox-field">
-          <input id="notifyOnComplete" type="checkbox">
-          <span class="field-label">下载完成后显示系统通知</span>
-        </label>
-        <div class="field">
-          <span class="field-label">站点登录状态</span>
-          <div id="loginStatus" class="login-status">打开设置后自动检测</div>
-          <div class="field-actions" style="display:flex;gap:8px;margin-top:8px;">
-            <button id="refreshLoginBtn" class="btn btn-ghost">刷新登录状态</button>
+        <section class="settings-section" data-settings-panel="model">
+          <div class="settings-card">
+            <h3 class="card-title">模型服务</h3>
+            <label class="field">
+              <span class="field-label">模型供应商</span>
+              <select id="providerSelect"></select>
+            </label>
+            <label class="field">
+              <span class="field-label">API Key</span>
+              <input id="apiKeyInput" type="password" placeholder="粘贴 API Key（仅存本地）">
+              <span class="field-hint">智谱 glm-4-flash 免费，去 open.bigmodel.cn 申请</span>
+            </label>
+            <label class="field">
+              <span class="field-label">模型名（可选）</span>
+              <input id="modelInput" type="text" placeholder="留空用默认模型">
+            </label>
+            <div id="testResult" class="test-result"></div>
           </div>
-        </div>
-        <div class="field">
-          <span class="field-label">配置备份（不含 API Key / Cookie）</span>
-          <div class="field-actions" style="display:flex;gap:8px;margin-top:8px;">
-            <button id="exportConfigBtn" class="btn btn-ghost">导出配置</button>
-            <button id="importConfigBtn" class="btn btn-ghost">导入配置</button>
+          <div class="settings-card">
+            <h3 class="card-title">偏好</h3>
+            <label class="switch-row" for="notifyOnComplete">
+              <span class="switch-copy">
+                <span class="switch-title">下载完成后显示系统通知</span>
+                <span class="switch-hint">任务结束时弹出 Windows 系统通知</span>
+              </span>
+              <input id="notifyOnComplete" type="checkbox">
+            </label>
           </div>
-        </div>
-        <label class="field">
-          <span class="field-label">站点登录（小红书、微博等需登录的站点）</span>
-          <input id="siteUrlInput" type="text" placeholder="粘贴网站首页，如 https://www.xiaohongshu.com">
-          <div class="field-actions" style="display:flex;gap:8px;margin-top:8px;">
-            <button id="siteLoginBtn" class="btn btn-ghost">打开登录窗口</button>
-            <button id="confirmLoginBtn" class="btn btn-ghost">完成登录</button>
+          <details class="settings-card adv-field">
+            <summary class="card-title">高级（通常不用改）</summary>
+            <label class="field">
+              <span class="field-label">代理地址</span>
+              <input id="proxyInput" type="text" placeholder="留空即可——程序自动探测系统代理">
+              <span class="field-hint">YouTube 等墙外站点：开着代理软件就会自动用上，一般不用填</span>
+            </label>
+            <label class="field">
+              <span class="field-label">手动 Cookie（登录失败时的备用）</span>
+              <textarea id="xhsCookieInput" rows="2" placeholder="一般不用填"></textarea>
+            </label>
+          </details>
+          <div class="settings-note">
+            Key 只保存在本机 config.json，不会上传。平台改版后更新一次即可。
           </div>
-          <span class="field-hint">打开窗口登录即可；小红书自动识别无需点「完成登录」，其他网站登录后点一下「完成登录」。登录态记住，之后发链接就能下</span>
-        </label>
-        <details class="field adv-field">
-          <summary class="field-label">高级（通常不用改）</summary>
-          <label class="field">
-            <span class="field-label">代理地址</span>
-            <input id="proxyInput" type="text" placeholder="留空即可——程序自动探测系统代理">
-            <span class="field-hint">YouTube 等墙外站点：开着代理软件就会自动用上，一般不用填</span>
-          </label>
-          <label class="field">
-            <span class="field-label">手动 Cookie（登录失败时的备用）</span>
-            <textarea id="xhsCookieInput" rows="2" placeholder="一般不用填"></textarea>
-          </label>
-        </details>
-        <div class="settings-actions">
-          <button id="testBtn" class="btn btn-ghost">测试连接</button>
-          <button id="checkUpdateBtn" class="btn btn-ghost">检查更新</button>
-          <button id="saveBtn" class="btn btn-primary">保存</button>
-        </div>
-        <div id="updateResult" class="update-result hidden"></div>
-        <div id="testResult" class="test-result"></div>
-        <div class="settings-note">
-          Key 只保存在本机 config.json，不会上传。平台改版后更新一次即可。
-        </div>
+        </section>
+
+        <section class="settings-section hidden" data-settings-panel="login">
+          <div class="settings-card">
+            <h3 class="card-title">站点登录状态</h3>
+            <div id="loginStatus" class="login-status">打开设置后自动检测</div>
+            <div class="field-actions">
+              <button id="refreshLoginBtn" class="btn btn-ghost">刷新登录状态</button>
+            </div>
+          </div>
+          <div class="settings-card">
+            <h3 class="card-title">登录新站点</h3>
+            <label class="field">
+              <span class="field-label">站点首页</span>
+              <input id="siteUrlInput" type="text" placeholder="粘贴网站首页，如 https://www.xiaohongshu.com">
+            </label>
+            <div class="field-actions">
+              <button id="siteLoginBtn" class="btn btn-ghost">打开登录窗口</button>
+              <button id="confirmLoginBtn" class="btn btn-ghost">完成登录</button>
+            </div>
+            <span class="field-hint">打开窗口登录即可；小红书自动识别无需点「完成登录」，其他网站登录后点一下「完成登录」。登录态记住，之后发链接就能下</span>
+          </div>
+        </section>
+
+        <section class="settings-section hidden" data-settings-panel="backup">
+          <div class="settings-card">
+            <h3 class="card-title">配置备份</h3>
+            <p class="card-desc">导出配置不含 API Key / Cookie，可安全保存到别处或迁移到新电脑。</p>
+            <div class="field-actions">
+              <button id="exportConfigBtn" class="btn btn-ghost">导出配置</button>
+              <button id="importConfigBtn" class="btn btn-ghost">导入配置</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-section hidden" data-settings-panel="about">
+          <div class="settings-card version-card">
+            <div class="version-head">
+              <img class="version-logo" src="favicon.png" alt="">
+              <div>
+                <h3 class="card-title">视频下载助手</h3>
+                <p class="card-desc">对话式视频下载与资产整理工具</p>
+              </div>
+              <span id="versionBadge" class="version-badge">读取中...</span>
+            </div>
+            <dl class="version-list" id="versionInfo">
+              <div><dt>版本</dt><dd>读取中...</dd></div>
+              <div><dt>运行环境</dt><dd>读取中...</dd></div>
+              <div><dt>数据目录</dt><dd>读取中...</dd></div>
+            </dl>
+            <div class="version-credit">
+              <span class="credit-label">作者 / 版权</span>
+              <a id="versionAuthor" class="credit-name" href="https://space.bilibili.com/477558144" target="_blank" rel="noopener noreferrer">信息科技练老师</a>
+            </div>
+            <div class="field-actions">
+              <button id="checkUpdateBtn" class="btn btn-ghost">检查更新</button>
+            </div>
+            <div id="updateResult" class="update-result hidden"></div>
+          </div>
+          <div class="settings-note">版本信息来自本机程序；检查更新会访问 GitHub Release。</div>
+        </section>
+      </div>
+      <div class="settings-footer">
+        <button id="testBtn" class="btn btn-ghost">测试连接</button>
+        <button id="saveBtn" class="btn btn-primary">保存设置</button>
       </div>
     </div>
   </div>

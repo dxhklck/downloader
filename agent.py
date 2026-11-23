@@ -3,35 +3,68 @@
 把用户的自然语言理解成工具调用，执行后把结果回灌模型，直到任务完成。
 API key 从 config.json 读取，不硬编码。
 """
-import json, threading, inspect
+import json, os, threading, inspect, itertools, uuid
+from datetime import date
+
 from openai import OpenAI
 
 import config
 import tools
 
 
+# 历史裁剪阈值：超过后保留摘要 + 最近若干轮完整对话。
+MAX_HISTORY_GROUPS = 8
+MAX_HISTORY_CHARS = 16000
+MAX_ANSWER_WAIT_SEC = 120
+
+
+def _ok(msg, **data):
+    return {"success": True, "message": msg, "data": data}
+
+
+def _fail(msg, error_code="tool_error", **data):
+    return {"success": False, "message": msg, "error_code": error_code,
+            "retryable": True, "data": data}
+
+
+def _normalize_result(result):
+    """统一工具结果字段，前端和模型都按同一结构处理。"""
+    if not isinstance(result, dict):
+        return {"success": False, "message": str(result)[:200],
+                "error_code": "invalid_result", "retryable": True, "data": {}}
+    success = bool(result.get("success"))
+    return {
+        "success": success,
+        "message": str(result.get("message", ""))[:500],
+        "data": result.get("data", {}),
+        "error_code": result.get("error_code") or ("ok" if success else "tool_error"),
+        "retryable": bool(result.get("retryable", not success)),
+    }
+
+
 def _result_str(result, limit=1500):
-    """工具结果回灌前截断，防止长日志/大列表吃满 token。"""
+    """工具结果回灌前裁剪；超大结果落盘并回传短预览。"""
+    normalized = _normalize_result(result)
+    s = json.dumps(normalized, ensure_ascii=False, default=str)
+    if len(s) <= limit:
+        return s
     try:
-        s = json.dumps(result, ensure_ascii=False)
+        directory = os.path.join(getattr(config, "_APP_DIR", "."), "logs", "tool_results")
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, uuid.uuid4().hex + ".json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(normalized, f, ensure_ascii=False, default=str)
+        preview = {
+            "success": normalized["success"],
+            "message": normalized["message"] + "（结果过大，已保存完整内容）",
+            "data": {"preview": s[:600], "file": path, "truncated": True},
+            "error_code": normalized["error_code"],
+            "retryable": normalized["retryable"],
+        }
+        return json.dumps(preview, ensure_ascii=False)
     except Exception:
-        s = str(result)
-    if len(s) > limit:
-        # 保留结构，重点砍掉 data.logs 之类的长文本
-        trimmed = dict(result) if isinstance(result, dict) else {"raw": result}
-        if isinstance(trimmed.get("data"), dict):
-            d = dict(trimmed["data"])
-            for k in ("logs", "log", "ranges"):
-                if k in d and isinstance(d[k], list) and len(d[k]) > 20:
-                    d[k] = d[k][:20] + [f"...(共{len(trimmed['data'][k])}项,已截断)"]
-            trimmed["data"] = d
-        try:
-            s = json.dumps(trimmed, ensure_ascii=False)
-        except Exception:
-            pass
-        if len(s) > limit:
-            s = s[:limit] + "…(已截断)"
-    return s
+        return s[:limit] + "…(已截断)"
+
 
 # 工具定义（给 LLM 看的）
 TOOLS = [
@@ -114,6 +147,192 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "make_plan",
+            "description": "把复杂请求拆成2-6步执行计划，界面会显示步骤卡。仅在需要多步操作时使用，不要用它代替实际工具。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "steps": {"type": "array", "items": {"type": "string"},
+                              "description": "有序步骤，每步一句话"},
+                },
+                "required": ["steps"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_choice",
+            "description": "当信息不足时向用户提出2-4个明确选项，等待用户选择。不要询问API Key、Cookie或密码。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "具体问题"},
+                    "options": {"type": "array", "items": {"type": "string"},
+                                "description": "2-4个互斥选项"},
+                },
+                "required": ["question", "options"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "asset_stats",
+            "description": "查询资产库统计：视频总数、总大小、各分类数量。用户问'有多少视频''占多少空间'时用。",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "asset_search",
+            "description": "在资产库按关键词、扩展名、分类和最小大小查找视频，返回少量结果。用户问'某个视频在哪''找最近下的mp4'时用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string", "description": "文件名或相对路径关键词"},
+                    "ext": {"type": "string", "description": "扩展名，如 .mp4"},
+                    "category": {"type": "string", "description": "顶层分类名"},
+                    "min_size_mb": {"type": "number", "description": "最小大小（MB）"},
+                    "limit": {"type": "integer", "description": "最多返回条数，默认20，上限20"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_folder",
+            "description": "在资产根目录下创建文件夹，可创建多级子目录。只允许相对根目录的安全路径，不能删除或移动文件。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "相对资产根目录的文件夹路径，如 动漫/2026}"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scan_assets",
+            "description": "刷新资产库索引并返回统计摘要。用户说'重新扫描资产''刷新资产库'时用。",
+            "parameters": {
+                "type": "object",
+                "properties": {"force": {"type": "boolean", "description": "是否强制全量扫描"}},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reveal_asset",
+            "description": "在文件管理器中定位并选中资产库里的视频文件。只允许资产库内的视频路径。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "资产库内视频的完整路径"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "move_asset",
+            "description": "移动或重命名资产库内视频。目标必须在资产根目录内，且不能覆盖已存在文件。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "src": {"type": "string", "description": "源视频完整路径"},
+                    "dest": {"type": "string", "description": "目标视频完整路径"},
+                },
+                "required": ["src", "dest"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "copy_asset",
+            "description": "复制资产库内视频到另一个目录。目标必须在资产根目录内，且不能覆盖已存在文件。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "src": {"type": "string", "description": "源视频完整路径"},
+                    "dest": {"type": "string", "description": "目标视频完整路径"},
+                },
+                "required": ["src", "dest"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "trash_asset",
+            "description": "把资产库内视频移入应用内回收站，不做永久删除，可恢复。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "源视频完整路径"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "restore_asset",
+            "description": "从应用内回收站恢复视频到原路径；原路径被占用时拒绝覆盖。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "回收站项目名称"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "organize_preview",
+            "description": "按规则生成批量整理预览，不实际改动文件。用于用户确认前展示将发生的变更。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "rule": {"type": "string", "enum": ["ext", "date", "size", "category"], "description": "整理规则"},
+                    "category": {"type": "string", "description": "ext规则下的扩展名，或category规则下的分类名"},
+                    "value": {"type": "string", "description": "可选的目标父目录"},
+                    "limit": {"type": "integer", "description": "最多预览数量，默认200"},
+                },
+                "required": ["rule"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "organize_apply",
+            "description": "按 organize_preview 生成的一次性预览批量执行整理。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "preview_id": {"type": "string", "description": "整理预览 id"},
+                },
+                "required": ["preview_id"],
+            },
+        },
+    },
 ]
 
 # 函数名 -> 实际函数
@@ -125,7 +344,26 @@ FUNCS = {
     "clean_temp": tools.clean_temp,
     "get_state": tools.get_state,
     "url_download": tools.url_download,
+    "make_plan": None,
+    "ask_choice": None,
+    "asset_stats": tools.asset_stats,
+    "asset_search": tools.asset_search,
+    "create_folder": tools.create_folder,
+    "scan_assets": tools.scan_assets,
+    "reveal_asset": tools.reveal_asset,
+    "move_asset": tools.move_asset,
+    "copy_asset": tools.copy_asset,
+    "trash_asset": tools.trash_asset,
+    "restore_asset": tools.restore_asset,
+    "organize_preview": tools.organize_preview,
+    "organize_apply": tools.organize_apply,
 }
+
+# 批量整理必须先预览再执行；预览工具本身不改动文件。
+CONFIRM_BEFORE = {"organize_apply"}
+
+# 这些工具由 Agent 自己处理，没有可重放的外部副作用。
+NO_RETRY_TOOLS = {"get_state", "make_plan", "ask_choice"}
 
 # 函数名 -> Schema 声明的参数名集合。LLM 只能传这些键，
 # 不能借函数签名里额外的可选参数（如 out_dir/ep_path）越权写路径。
@@ -140,6 +378,7 @@ _PLATFORM_PREFIXES = (
     (("b站", "哔哩哔哩", "bilibili"), "bili_"),
     (("抖音", "douyin"), "douyin_"),
 )
+_PLATFORM_TOOLS = {"bili_status", "bili_download", "douyin_random", "douyin_login", "url_download"}
 
 
 def _forced_platform(text):
@@ -149,6 +388,13 @@ def _forced_platform(text):
         if any(w in low for w in words):
             return prefix
     return None
+
+
+def _tool_forbidden(forced, name):
+    if not forced or name not in _PLATFORM_TOOLS:
+        return False
+    return not name.startswith(forced)
+
 
 SYSTEM = """你是视频下载助手。用户用中文告诉你要下载什么，你通过调用工具完成任务。
 最重要的规则：先看用户提到的平台（B站/哔哩哔哩/bilibili 或 抖音/douyin），再选工具。
@@ -168,9 +414,109 @@ SYSTEM = """你是视频下载助手。用户用中文告诉你要下载什么�
 5. 用户问当前任务进度/下完没 → 调 get_state；问某部番剧总共下了多少集 → 调 bili_status。
 6. 用户说登录 → 调 douyin_login；但提到 B站登录时，文字回复"B站请在设置页通用登录里打开 bilibili.com 扫码"，不要调 douyin_login。
 7. 用户说清理 → 调 clean_temp。
-8. 每次只返回一个工具调用，等结果后再决定下一步。任务完成后用简洁中文汇报结果。
-9. 如果工具返回失败（success=false），如实告诉用户原因，不要假装成功。
+
+资产与协作规则：
+8. 用户问资产库有多少、占多少空间 → asset_stats；找文件/问文件在哪 → asset_search；要重新扫描 → scan_assets；要在文件管理器中定位 → reveal_asset。
+9. 用户要新建下载分类或文件夹 → create_folder；路径必须相对资产根目录。
+10. 用户要移动/重命名视频 → move_asset；复制 → copy_asset；删除 → trash_asset（只进应用回收站）；从回收站恢复 → restore_asset。所有目标必须在资产根目录内，不能覆盖同名文件。
+11. 用户要批量整理 → 必须先用 organize_preview 生成预览并把变更告诉用户；只有用户明确确认后才调用 organize_apply。单次移动/重命名/复制/删除不需要额外确认。
+12. 复杂请求先 make_plan 展示步骤，再逐步执行；信息不足时用 ask_choice 给出2-4个选项，不要询问 Key/Cookie/密码。
+13. 资产与文件夹工具与平台无关，不受 B站/抖音平台硬路由限制。
+14. 每次只返回一个工具调用，等结果后再决定下一步。任务完成后用简洁中文汇报结果。
+15. 如果工具返回失败（success=false），如实告诉用户原因，不要假装成功。
 """
+
+
+def _shorten(value, limit=160):
+    s = str(value) if value is not None else ""
+    return s if len(s) <= limit else s[:limit] + "…"
+
+
+def _dynamic_context():
+    """只注入非敏感的运行状态，绝不把 Key/Cookie 内容喂给模型。"""
+    parts = ["当前日期：" + date.today().isoformat()]
+    root = getattr(config, "ROOT", "")
+    if root:
+        parts.append("资产根目录：" + str(root))
+    try:
+        state = tools.get_state()
+        parts.append("当前任务：%s；进度 %s/%s；运行中：%s" % (
+            _shorten(state.get("task") or "无"), state.get("done", 0),
+            state.get("total", 0), bool(state.get("running"))))
+        queue = state.get("queue") or []
+        if queue:
+            parts.append("排队任务：" + "；".join(
+                "#%s %s" % (q.get("id"), _shorten(q.get("name"), 40)) for q in queue[:5]))
+    except Exception:
+        pass
+    try:
+        login = tools.get_login_status()
+        parts.append("登录状态：" + "；".join(
+            "%s=%s" % (k, v.get("status")) for k, v in login.items()
+            if isinstance(v, dict)))
+    except Exception:
+        pass
+    return "\n".join(parts)
+
+
+def _message_dict(msg):
+    """把 SDK 消息对象规范成可保存、可回灌的普通字典。"""
+    if isinstance(msg, dict):
+        return msg
+    tool_calls = []
+    for tc in getattr(msg, "tool_calls", None) or []:
+        fn = getattr(tc, "function", None)
+        tool_calls.append({
+            "id": getattr(tc, "id", ""),
+            "type": "function",
+            "function": {
+                "name": getattr(fn, "name", ""),
+                "arguments": getattr(fn, "arguments", "{}"),
+            },
+        })
+    data = {"role": getattr(msg, "role", "assistant"),
+            "content": getattr(msg, "content", None)}
+    if tool_calls:
+        data["tool_calls"] = tool_calls
+    return data
+
+
+def _history_groups(messages):
+    """按用户消息分组，保证组内 tool_use/tool_result 不分离。"""
+    groups = []
+    current = []
+    for msg in messages:
+        data = _message_dict(msg)
+        if data.get("role") == "user" and current:
+            groups.append(current)
+            current = []
+        current.append(data)
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _make_summary(history):
+    lines = []
+    for msg in history:
+        content = _message_dict(msg).get("content")
+        if isinstance(content, str) and content.strip():
+            lines.append("%s: %s" % (msg.get("role"), _shorten(content, 120)))
+    return "；".join(lines[-24:])[:1200]
+
+
+def _clip_history(history):
+    groups = _history_groups(history)
+    normalized = [_message_dict(m) for m in history]
+    size = len(json.dumps(normalized, ensure_ascii=False))
+    if len(groups) <= MAX_HISTORY_GROUPS and size <= MAX_HISTORY_CHARS:
+        return normalized
+    keep = groups[-MAX_HISTORY_GROUPS:]
+    clipped = [m for group in keep for m in group]
+    summary = _make_summary([m for group in groups[:-MAX_HISTORY_GROUPS] for m in group])
+    if summary:
+        clipped.insert(0, {"role": "user", "content": "此前对话摘要：" + summary})
+    return clipped
 
 
 class Agent:
@@ -179,6 +525,11 @@ class Agent:
         self.emit = emit
         self.client = None
         self.model = None
+        self.history = []
+        self.plan = []
+        self._choice_lock = threading.Lock()
+        self._choices = {}
+        self._choice_seq = itertools.count(1)
         self._refresh_client()
 
     def _refresh_client(self):
@@ -193,6 +544,105 @@ class Agent:
         key, _, _ = config.llm_params()
         return bool(key)
 
+    def answer_choice(self, answer_id, value):
+        """前端选项回调：唤醒等待中的 ask_choice。"""
+        with self._choice_lock:
+            entry = self._choices.get(str(answer_id))
+            if not entry:
+                return {"ok": False, "message": "选项已过期或不存在"}
+            options = entry["options"]
+            text = str(value)
+            if text not in options:
+                return {"ok": False, "message": "请选择给出的选项", "options": options}
+            entry["answer"] = text
+            entry["event"].set()
+        return {"ok": True, "message": "已记录选择", "answer": text}
+
+    def _ask_choice(self, args):
+        question = _shorten(args.get("question") or "请选择", 500)
+        options = args.get("options") if isinstance(args.get("options"), list) else []
+        options = [_shorten(x, 160) for x in options if str(x).strip()][:4]
+        if len(options) < 2:
+            return _fail("选择题至少需要2个选项", error_code="bad_arguments")
+
+        answer_id = "c%s" % next(self._choice_seq)
+        event = threading.Event()
+        entry = {"event": event, "options": options, "answer": None}
+        with self._choice_lock:
+            self._choices[answer_id] = entry
+        self.emit("ask_choice", {"id": answer_id, "question": question, "options": options})
+        try:
+            waited = event.wait(MAX_ANSWER_WAIT_SEC)
+        finally:
+            with self._choice_lock:
+                self._choices.pop(answer_id, None)
+        if not waited or not entry["answer"]:
+            return _fail("用户未选择，超时", error_code="timeout")
+        return _ok("用户选择了：" + entry["answer"], answer=entry["answer"], id=answer_id)
+
+    def _make_plan(self, args):
+        steps = args.get("steps") if isinstance(args.get("steps"), list) else []
+        steps = [_shorten(x, 200) for x in steps if str(x).strip()][:6]
+        if len(steps) < 2:
+            return _fail("执行计划至少需要2个步骤", error_code="bad_arguments")
+        self.plan = steps
+        self.emit("plan", {"steps": steps})
+        return _ok("已生成执行计划", steps=steps)
+
+    def _organize_preview(self, args):
+        result = _normalize_result(tools.organize_preview(
+            rule=args.get("rule"),
+            category=args.get("category"),
+            value=args.get("value"),
+            limit=args.get("limit", 200),
+        ))
+        if result["success"]:
+            self.emit("organize_preview", result["data"])
+            result["message"] += "；请在界面确认后再执行"
+        return result
+
+    def _execute_tool(self, name, args, forced, tool_call_id):
+        import time
+        started = time.monotonic()
+        self.emit("tool", {"name": name, "args": args, "status": "running",
+                           "tool_call_id": tool_call_id})
+        if not isinstance(args, dict):
+            result = _fail("工具参数格式错误，请重新调用", error_code="bad_arguments")
+        elif _tool_forbidden(forced, name):
+            platform = "B站" if forced == "bili_" else "抖音"
+            result = _fail(
+                f"用户明确指定{platform}，禁止调用 {name}。请改用{platform}的工具，或文字说明该平台不支持此需求。",
+                error_code="platform_conflict")
+        elif name == "make_plan":
+            result = self._make_plan(args)
+        elif name == "ask_choice":
+            result = self._ask_choice(args)
+        elif name == "organize_preview":
+            result = self._organize_preview(args)
+        else:
+            fn = FUNCS.get(name)
+            if not callable(fn):
+                result = _fail(f"未知工具 {name}", error_code="unknown_tool")
+            else:
+                schema_keys = _SCHEMA_PARAMS.get(name, set())
+                signature_keys = set(inspect.signature(fn).parameters)
+                call_args = {k: v for k, v in args.items() if k in schema_keys & signature_keys}
+                try:
+                    result = fn(**call_args)
+                except Exception as e:
+                    result = _fail(str(e)[:200], error_code="tool_exception")
+        result = _normalize_result(result)
+        elapsed = int((time.monotonic() - started) * 1000)
+        self.emit("tool_done", {"name": name, "status": "ok" if result["success"] else "error",
+                                "tool_call_id": tool_call_id, "elapsed_ms": elapsed,
+                                "error_code": result["error_code"]})
+        return result
+
+    @staticmethod
+    def _retryable_api_error(e):
+        code = getattr(e, "status_code", None)
+        return code is None or code == 429 or (isinstance(code, int) and 500 <= code < 600)
+
     def chat(self, user_text):
         """处理一条用户消息。在后台线程调用，通过 emit 推送过程。"""
         if not self.configured():
@@ -202,9 +652,12 @@ class Agent:
         forced = _forced_platform(user_text)
         messages = [
             {"role": "system", "content": SYSTEM},
+            {"role": "system", "content": _dynamic_context()},
+            *self.history,
             {"role": "user", "content": user_text},
         ]
         self.emit("msg", "思考中...")
+        retried = False
 
         for turn in range(8):  # 最多 8 轮工具调用
             try:
@@ -213,6 +666,10 @@ class Agent:
                     tool_choice="auto", max_tokens=2000,
                 )
             except Exception as e:
+                if not retried and self._retryable_api_error(e):
+                    retried = True
+                    self.emit("status", "模型请求失败，正在重试...")
+                    continue
                 code = getattr(e, "status_code", None)
                 if code == 401:
                     hint = "API Key 无效或过期，请在设置里重新填写"
@@ -223,7 +680,8 @@ class Agent:
                 else:
                     hint = f"调用模型失败：{str(e)[:160]}"
                 self.emit("msg", hint)
-                return
+                break
+            retried = False
             choice = resp.choices[0]
             msg = choice.message
 
@@ -231,43 +689,26 @@ class Agent:
                 self.emit("msg", msg.content)
 
             if not msg.tool_calls:
-                return  # 模型认为任务完成
+                break  # 模型认为任务完成
 
             # 助手消息只追加一次（含全部 tool_calls），否则多工具调用时重复入列会致 API 400
-            messages.append(msg)
+            messages.append(_message_dict(msg))
             for tc in msg.tool_calls:
                 name = tc.function.name
+                tool_call_id = getattr(tc, "id", "call_%s" % next(self._choice_seq))
                 try:
                     args = json.loads(tc.function.arguments) if tc.function.arguments else {}
                     if not isinstance(args, dict):
                         raise ValueError("参数不是对象")
                 except Exception:
                     args = None
-                self.emit("tool", {"name": name, "args": args or {}})
-                fn = FUNCS.get(name)
-                if forced and not name.startswith(forced):
-                    platform = "B站" if forced == "bili_" else "抖音"
-                    result = {"success": False,
-                              "message": f"用户明确指定{platform}，禁止调用 {name}。请改用{platform}的工具，或文字说明该平台不支持此需求。"}
-                elif args is None:
-                    result = {"success": False, "message": "工具参数格式错误，请重新调用"}
-                elif not fn:
-                    result = {"success": False, "message": f"未知工具 {name}"}
-                else:
-                    # 双重白名单：Schema 未声明的参数一律丢弃（防越权），
-                    # 且函数签名不接受的参数也不传（防 TypeError）。
-                    schema_keys = _SCHEMA_PARAMS.get(name, set())
-                    signature_keys = set(inspect.signature(fn).parameters)
-                    accepted = schema_keys & signature_keys
-                    call_args = {k: v for k, v in args.items() if k in accepted}
-                    try:
-                        result = fn(**call_args)
-                    except Exception as e:
-                        result = {"success": False, "message": str(e)[:200]}
-                self.emit("result", result)
+                result = self._execute_tool(name, args, forced, tool_call_id)
+                self.emit("result", {**result, "name": name, "tool_call_id": tool_call_id})
                 messages.append({
-                    "role": "tool", "tool_call_id": tc.id,
+                    "role": "tool", "tool_call_id": tool_call_id,
                     "content": _result_str(result),
                 })
+        else:
+            self.emit("msg", "（已执行多轮工具调用，如有未完成请再说一次）")
 
-        self.emit("msg", "（已执行多轮工具调用，如有未完成请再说一次）")
+        self.history = _clip_history(messages[2:])

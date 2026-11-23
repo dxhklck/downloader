@@ -5,6 +5,7 @@ const pendingJobs = new Set();  // 已入队、尚未收到 done 的任务 id
 const thinkingByJob = new Map(); // job id -> 该任务的“思考中”占位
 let runningJobId = null;   // job_start 标记正在执行的任务
 let lastToolCall = null;   // 最近一次工具调用，供结果卡重试
+let lastToolEventId = null;
 let logGen = -1;           // 日志代际号，配合后端 clear_logs 丢弃在途旧日志
 const ERR_HINT = {
   1455: '电脑内存临时不够了，请关掉其它程序再试',
@@ -92,6 +93,90 @@ function addMessage(text, who) {
   return div;
 }
 
+function organizeCard(data) {
+  const box = $('choiceCard');
+  if (!box || !data || !data.preview_id || !Array.isArray(data.changes)) return;
+  const rows = data.changes.map((c) =>
+    '<div class="choice-row">' + escapeHtml(c.src) + '<br>→ ' + escapeHtml(c.dest) + '</div>').join('');
+  box.innerHTML = '<div class="choice-question">批量整理预览（' + (data.total || data.changes.length) +
+    ' 项，下面显示前 ' + data.changes.length + ' 项）</div><div class="choice-changes">' + rows +
+    '</div><div class="choice-options">' +
+    '<button class="choice-option" data-organize-confirm="1" data-preview-id="' + escapeHtml(data.preview_id) + '">确认执行</button>' +
+    '<button class="choice-option" data-organize-confirm="0">取消</button></div>' +
+    '<div class="choice-note">仅执行预览中的文件；同名目标会被跳过。</div>';
+  box.classList.remove('hidden');
+  box.querySelectorAll('[data-organize-confirm]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const confirmed = btn.dataset.organizeConfirm === '1';
+      const previewId = btn.dataset.previewId;
+      btn.disabled = true;
+      try {
+        const r = await api.confirm_organize(previewId, confirmed);
+        if (r && r.ok) {
+          box.classList.add('hidden');
+          addMessage('已确认批量整理（任务 #' + r.id + '）', 'user');
+        } else if (!confirmed) {
+          box.classList.add('hidden');
+          addMessage('已取消批量整理', 'user');
+        } else {
+          btn.disabled = false;
+          addResult({ success: false, message: r && r.message || '确认失败' });
+        }
+      } catch (e) {
+        btn.disabled = false;
+        addResult({ success: false, message: friendlyError(e), detail: String(e) });
+      }
+    });
+  });
+  scrollChat();
+}
+
+function planCard(steps) {
+  const div = document.createElement('div');
+  div.className = 'msg msg-agent';
+  const items = steps.map((s, i) =>
+    '<li class="plan-step"><span class="plan-index">' + (i + 1) + '</span>' +
+    escapeHtml(s) + '</li>').join('');
+  div.innerHTML = '<div class="msg-avatar">助</div><div class="msg-body">' +
+    '<div class="plan-card"><div class="plan-head">执行计划</div><ol class="plan-list">' +
+    items + '</ol></div></div>';
+  $('chatLog').appendChild(div);
+  scrollChat();
+  saveHistory();
+}
+
+function showChoice(data) {
+  const box = $('choiceCard');
+  if (!box || !data || !data.id || !Array.isArray(data.options)) return;
+  box.innerHTML = '<div class="choice-question">' + escapeHtml(data.question || '请选择') + '</div>' +
+    '<div class="choice-options">' + data.options.map((opt, i) =>
+      '<button class="choice-option" data-choice-id="' + escapeHtml(data.id) +
+      '" data-choice-index="' + i + '">' + escapeHtml(opt) + '</button>').join('') +
+    '</div><div class="choice-note">请选择一个选项后继续。</div>';
+  box.classList.remove('hidden');
+  box.querySelectorAll('[data-choice-id]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const answerId = btn.dataset.choiceId;
+      const value = data.options[Number(btn.dataset.choiceIndex)];
+      btn.disabled = true;
+      try {
+        const r = await api.answer_choice(answerId, value);
+        if (r && r.ok) {
+          box.classList.add('hidden');
+          addMessage('已选择：' + value, 'user');
+        } else {
+          btn.disabled = false;
+          addResult({ success: false, message: r && r.message || '选择提交失败' });
+        }
+      } catch (e) {
+        btn.disabled = false;
+        addResult({ success: false, message: friendlyError(e), detail: String(e) });
+      }
+    });
+  });
+  scrollChat();
+}
+
 function toolStatusCard(name, args, status) {
   const rows = Object.entries(args || {}).map(([k, v]) =>
     '<div class="tool-card-row"><span class="tool-card-key">' + escapeHtml(k) +
@@ -114,6 +199,7 @@ function addToolStatus(name, args) {
   $('chatLog').appendChild(card);
   card.dataset.toolName = name;
   card.dataset.toolArgs = JSON.stringify(args || {});
+  if (lastToolEventId) card.dataset.toolCallId = lastToolEventId;
   lastToolCall = { name, args: args || {} };
   scrollChat();
   saveHistory();
@@ -121,7 +207,11 @@ function addToolStatus(name, args) {
 
 function markToolStatus(result) {
   const cards = $('chatLog').querySelectorAll('.tool-card[data-tool-name]');
-  const card = Array.from(cards).reverse().find((n) => !n.dataset.toolDone);
+  let card = null;
+  if (result && result.tool_call_id) {
+    card = Array.from(cards).find((n) => n.dataset.toolCallId === result.tool_call_id && !n.dataset.toolDone);
+  }
+  if (!card) card = Array.from(cards).reverse().find((n) => !n.dataset.toolDone);
   if (!card) return;
   let args = {};
   try { args = JSON.parse(card.dataset.toolArgs || '{}'); } catch (e) {}
@@ -184,7 +274,9 @@ async function retryResult(btn) {
   try {
     const r = await api.retry_tool(lastToolCall.name, lastToolCall.args);
     if (r && r.ok) {
+      const thinking = showThinking();
       pendingJobs.add(r.id);
+      thinkingByJob.set(r.id, thinking);
       refreshBusy();
       addMessage('重试：' + lastToolCall.name + '（任务 #' + r.id + '）', 'user');
     } else {
@@ -269,7 +361,42 @@ async function poll() {
           if (ev.data && ev.data.job_id) clearThinking(ev.data.job_id);
           else if (runningJobId) clearThinking(runningJobId);
           else removeThinking();
+          lastToolEventId = ev.data && ev.data.tool_call_id ? ev.data.tool_call_id : null;
           addToolStatus(ev.data.name, ev.data.args);
+          break;
+        case 'tool_done':
+          if (ev.data && ev.data.tool_call_id) {
+            const doneCard = Array.from($('chatLog').querySelectorAll(
+              '.tool-card[data-tool-call-id="' + CSS.escape(ev.data.tool_call_id) + '"]'))
+              .find((n) => !n.dataset.toolDone);
+            if (doneCard) {
+              doneCard.dataset.toolDone = ev.data.status;
+              const head = doneCard.querySelector('.tool-card-head');
+              let state = head && head.querySelector('.tool-card-state');
+              if (!state && head) {
+                state = document.createElement('span');
+                head.appendChild(state);
+              }
+              if (state) {
+                state.className = 'tool-card-state ' + (ev.data.status === 'ok' ? 'ok' : 'fail');
+                state.textContent = (ev.data.status === 'ok' ? '完成' : '失败') +
+                  (ev.data.elapsed_ms ? ' · ' + ev.data.elapsed_ms + 'ms' : '');
+              }
+            }
+          }
+          break;
+        case 'plan':
+          if (ev.data && Array.isArray(ev.data.steps)) planCard(ev.data.steps);
+          break;
+        case 'organize_preview':
+          organizeCard(ev.data);
+          break;
+        case 'ask_choice':
+          showChoice(ev.data);
+          break;
+        case 'status':
+          if (runningJobId) clearThinking(runningJobId);
+          addMessage(ev.data, 'agent');
           break;
         case 'result':
           markToolStatus(ev.data);
@@ -379,8 +506,63 @@ async function openSettings() {
   $('xhsCookieInput').value = cfg.xhs_cookie || '';
   $('siteUrlInput').value = cfg.last_site || '';
   $('testResult').textContent = '';
+  setSettingsTab('model');
   $('settingsOverlay').classList.remove('hidden');
   refreshLoginStatus();
+  loadVersionInfo();
+}
+
+function setSettingsTab(name) {
+  document.querySelectorAll('[data-settings-tab]').forEach((btn) => {
+    const active = btn.dataset.settingsTab === name;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  document.querySelectorAll('[data-settings-panel]').forEach((panel) => {
+    panel.classList.toggle('hidden', panel.dataset.settingsPanel !== name);
+  });
+}
+
+async function loadVersionInfo() {
+  const badge = $('versionBadge');
+  const list = $('versionInfo');
+  const author = $('versionAuthor');
+  if (!badge || !list) return;
+  badge.textContent = '读取中...';
+  list.innerHTML = '<div><dt>版本</dt><dd>读取中...</dd></div>' +
+    '<div><dt>运行环境</dt><dd>读取中...</dd></div>' +
+    '<div><dt>数据目录</dt><dd>读取中...</dd></div>';
+  try {
+    const r = await api.get_version_info();
+    if (!r || !r.ok) throw new Error((r && r.message) || '读取失败');
+    badge.textContent = 'v' + escapeHtml(r.version);
+    list.innerHTML =
+      '<div><dt>版本</dt><dd>' + escapeHtml(r.version) + '</dd></div>' +
+      '<div><dt>运行环境</dt><dd>' + escapeHtml(r.platform) + ' · Python ' + escapeHtml(r.python) + '</dd></div>' +
+      '<div><dt>数据目录</dt><dd class="version-path" title="' + escapeHtml(r.root) + '">' + escapeHtml(r.root) + '</dd></div>';
+    if (author) {
+      const name = r.author || author.textContent;
+      author.textContent = name;
+      if (r.author_url) {
+        author.href = r.author_url;
+        author.title = '打开作者主页：' + name;
+        author.onclick = (ev) => { ev.preventDefault(); api.open_external(r.author_url); };
+      } else {
+        author.removeAttribute('href');
+        author.removeAttribute('title');
+        author.onclick = null;
+      }
+    }
+  } catch (e) {
+    badge.textContent = '未知';
+    list.innerHTML = '<div><dt>版本</dt><dd>读取失败</dd></div>' +
+      '<div><dt>运行环境</dt><dd>' + escapeHtml(friendlyError(e)) + '</dd></div>';
+    if (author) {
+      author.textContent = '信息科技练老师';
+      author.href = 'https://space.bilibili.com/477558144';
+      author.onclick = (ev) => { ev.preventDefault(); api.open_external('https://space.bilibili.com/477558144'); };
+    }
+  }
 }
 
 async function refreshLoginStatus() {
@@ -456,7 +638,23 @@ async function downloadUpdate() {
     const d = await api.download_update(r.asset, r.page);
     if (!d.ok) { box.className = 'update-result fail'; box.textContent = friendlyError(d.detail || d.message); return; }
     box.className = 'update-result ok';
-    box.textContent = '已下载到：' + d.path + '。请手动运行安装包完成更新。';
+    box.textContent = '已下载到：' + d.path + '。点击下面按钮安装。';
+    const install = document.createElement('button');
+    install.className = 'btn btn-ghost';
+    install.textContent = '运行安装包';
+    install.onclick = async () => {
+      install.disabled = true;
+      try {
+        const ir = await api.install_update(d.path);
+        if (!ir || !ir.ok) throw new Error((ir && ir.message) || '启动失败');
+        box.textContent = ir.message;
+      } catch (e) {
+        install.disabled = false;
+        box.className = 'update-result fail';
+        box.textContent = '无法启动安装包：' + friendlyError(e);
+      }
+    };
+    box.appendChild(install);
   } catch (e) {
     box.className = 'update-result fail';
     box.textContent = '下载失败：' + friendlyError(e);
@@ -596,10 +794,11 @@ function renderAssets() {
     '<td>'+escapeHtml(x.cat)+'</td>' +
     '<td class="num">'+fmtSize(x.size)+'</td>' +
     '<td class="num">'+fmtDur(x.dur)+'</td>' +
-    '<td class="num">'+fmtDate(x.mtime)+'</td></tr>'
+    '<td class="num">'+fmtDate(x.mtime)+'</td>' +
+    '<td><button class="asset-del" data-asset-del="'+escapeHtml(x.path)+'" title="移入回收站">删除</button></td></tr>'
   ).join('');
   const more = rows.length > CAP ? ' · 仅显示前 '+CAP+' 行，请细化搜索' : '';
-  $('assetFooter').textContent = '显示 '+shown.length+' / '+assetsData.length+' 个 · 双击打开 · 右键定位文件'+more;
+  $('assetFooter').textContent = '显示 '+shown.length+' / '+assetsData.length+' 个 · 双击打开 · 右键定位文件 · 删除可恢复'+more;
 }
 
 function selectedAssets() {
@@ -620,9 +819,65 @@ function exportAssetCsv() {
   URL.revokeObjectURL(a.href);
 }
 
+function askConfirm(title, message, okText) {
+  return new Promise((resolve) => {
+    const overlay = $('confirmOverlay');
+    $('confirmTitle').textContent = title;
+    $('confirmMessage').textContent = message;
+    $('confirmOk').textContent = okText || '确认';
+    overlay.classList.remove('hidden');
+    const finish = (value) => {
+      overlay.classList.add('hidden');
+      $('confirmOk').onclick = null;
+      $('confirmCancel').onclick = null;
+      document.removeEventListener('keydown', onKey);
+      resolve(value);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') finish(false);
+      else if (e.key === 'Enter') finish(true);
+    };
+    $('confirmOk').onclick = () => finish(true);
+    $('confirmCancel').onclick = () => finish(false);
+    document.addEventListener('keydown', onKey);
+  });
+}
+
+async function deleteAssets(paths) {
+  if (!paths.length) { $('assetFooter').textContent = '请先勾选视频'; return; }
+  const label = paths.length === 1 ? '这 1 个视频' : '这 '+paths.length+' 个视频';
+  const ok = await askConfirm('移入回收站',
+    '确定把'+label+'移入回收站吗？之后可以恢复。', '确认删除');
+  if (!ok) return;
+  $('assetFooter').textContent = '正在移入回收站...';
+  try {
+    const r = paths.length === 1
+      ? await api.asset_trash(paths[0])
+      : await api.asset_trash_batch(paths);
+    if (!r || !r.success) {
+      $('assetFooter').textContent = '删除失败：' + ((r && r.message) || '未知错误');
+      return;
+    }
+    const failed = new Set(((r.data && r.data.failed) || []).map((f) => f.path));
+    const removed = new Set(paths.filter((p) => !failed.has(p)));
+    assetsData = assetsData.filter((x) => !removed.has(x.path));
+    loadAssets(false).then(() => {
+      $('assetFooter').textContent = r.message + ' · 可在回收站恢复';
+    });
+  } catch (e) {
+    $('assetFooter').textContent = '删除失败：' + friendlyError(e);
+  }
+}
+
 // 事件委托：只在 tbody 上绑一次，避免每次渲染绑定 2N 个监听器
 function initAssetEvents() {
   const tbody = $('assetRows');
+  tbody.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-asset-del]');
+    if (!btn) return;
+    e.stopPropagation();
+    deleteAssets([btn.dataset.assetDel]);
+  });
   tbody.addEventListener('dblclick', (e) => {
     const tr = e.target.closest('tr[data-path]');
     if (tr) openPlayer(tr.dataset.path, tr.querySelector('.fname').textContent);
@@ -681,6 +936,7 @@ onReady(async () => {
     catch (e) { $('assetFooter').textContent = '复制失败：' + friendlyError(e); }
   });
   $('assetExportCsv').addEventListener('click', exportAssetCsv);
+  $('assetDeleteSelected').addEventListener('click', () => deleteAssets(selectedAssets()));
   restoreHistory();
   $('clearChatBtn').addEventListener('click', clearHistory);
   $('cancelTaskBtn').addEventListener('click', async () => {
@@ -694,6 +950,9 @@ onReady(async () => {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey || !e.shiftKey)) send();
   });
   $('settingsBtn').addEventListener('click', openSettings);
+  document.querySelectorAll('[data-settings-tab]').forEach((btn) => {
+    btn.addEventListener('click', () => setSettingsTab(btn.dataset.settingsTab));
+  });
   $('closeSettings').addEventListener('click', () => $('settingsOverlay').classList.add('hidden'));
   $('settingsOverlay').addEventListener('click', (e) => {
     if (e.target === $('settingsOverlay')) $('settingsOverlay').classList.add('hidden');

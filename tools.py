@@ -3,7 +3,7 @@
 每个函数返回结构化 dict（success/message/data），不抛异常到调用层。
 进度通过可选的 progress 回调推送（GUI 用它更新界面）。
 """
-import os, sys, json, re, time, random, subprocess, urllib.request, threading
+import os, sys, json, re, time, random, subprocess, urllib.request, threading, itertools
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import config
@@ -114,8 +114,11 @@ def _ok(msg, **data):
     return {"success": True, "message": msg, "data": data}
 
 
-def _fail(msg):
-    return {"success": False, "message": msg, "data": {}}
+def _fail(msg, error_code="tool_error", **data):
+    payload = data.pop("data", {})
+    payload.update(data)
+    return {"success": False, "message": msg, "error_code": error_code,
+            "retryable": True, "data": payload}
 
 
 def get_login_status():
@@ -143,6 +146,347 @@ def get_login_status():
         "site": {"status": "ok" if domains(config.COOKIES_FILE) else "none",
                  "domains": domains(config.COOKIES_FILE) or []},
     }
+
+
+def _safe_media_file(path):
+    """校验完整路径是 ROOT 内的真实视频文件。"""
+    if not isinstance(path, str) or not path.strip():
+        return None
+    try:
+        root = os.path.realpath(config.ROOT)
+        full = os.path.realpath(path)
+        if os.path.commonpath([full, root]) != root or full == root:
+            return None
+        if not os.path.isfile(full):
+            return None
+        if not full.lower().endswith((".mp4", ".mkv", ".avi", ".mov", ".flv", ".webm")):
+            return None
+        return full
+    except (ValueError, OSError):
+        return None
+
+
+def _safe_dest_file(path):
+    """校验目标文件位置必须在 ROOT 内，且不允许覆盖。"""
+    if not isinstance(path, str) or not path.strip():
+        return None
+    try:
+        root = os.path.realpath(config.ROOT)
+        full = os.path.realpath(path)
+        if os.path.commonpath([full, root]) != root or full == root:
+            return None
+        if not full.lower().endswith((".mp4", ".mkv", ".avi", ".mov", ".flv", ".webm")):
+            return None
+        if os.path.exists(full):
+            return None
+        parent = os.path.dirname(full)
+        if os.path.commonpath([parent, root]) != root:
+            return None
+        return full
+    except (ValueError, OSError):
+        return None
+
+
+def _trash_dir():
+    return os.path.join(config._APP_DIR, "asset_trash")
+
+
+def _safe_agent_dir(rel):
+    """把相对资产根目录的用户路径解析为安全目录，拒绝越界和非法字符。"""
+    if not isinstance(rel, str) or not rel.strip():
+        return None
+    rel = rel.strip().replace("\\", "/")
+    if os.path.isabs(rel) or ":" in rel or "\x00" in rel or ".." in rel.split("/"):
+        return None
+    parts = [p for p in rel.split("/") if p and p != "."]
+    if not parts or len(parts) > 8:
+        return None
+    for part in parts:
+        upper = part.upper()
+        if upper in ("CON", "PRN", "AUX", "NUL"):
+            return None
+        if upper.rstrip("0123456789") in ("COM", "LPT") and upper.rstrip("0123456789") != upper:
+            return None
+        if any(ch in part for ch in '<>"|?*'):
+            return None
+    root = os.path.realpath(config.ROOT)
+    full = os.path.realpath(os.path.join(root, *parts))
+    if os.path.commonpath([full, root]) != root or full == root:
+        return None
+    return full
+
+
+def create_folder(path):
+    """在资产根目录下创建文件夹；只允许相对安全路径，不做删除/移动。"""
+    full = _safe_agent_dir(path)
+    if not full:
+        return _fail("路径无效：请给出资产根目录下的相对路径，不能包含 '..' 或盘符")
+    try:
+        existed = os.path.isdir(full)
+        os.makedirs(full, exist_ok=True)
+        return _ok("文件夹已存在" if existed else "文件夹已创建", path=full)
+    except OSError as e:
+        return _fail("创建文件夹失败：" + str(e)[:200], error_code="mkdir_failed")
+
+
+def asset_stats():
+    """返回资产统计摘要，不向模型暴露完整文件列表。"""
+    import assets
+    try:
+        result = assets.scan(include_duration=False)
+    except Exception as e:
+        return _fail("资产扫描失败：" + str(e)[:200], error_code="asset_scan_failed")
+    data = result.get("data", {})
+    stats = data.get("stats", {})
+    return _ok(result.get("message", "资产统计完成"),
+               total=stats.get("total", 0), total_gb=stats.get("total_gb", 0),
+               categories=stats.get("cats", {}), scanned_at=data.get("scanned_at"))
+
+
+def asset_search(keyword=None, ext=None, category=None, min_size_mb=0, limit=20):
+    """按条件筛选资产，结果最多20条，且只返回轻量字段。"""
+    import assets
+    try:
+        result = assets.scan(include_duration=False)
+        items = result.get("data", {}).get("items", [])
+    except Exception as e:
+        return _fail("资产扫描失败：" + str(e)[:200], error_code="asset_scan_failed")
+    kw = str(keyword or "").strip().lower()
+    ex = str(ext or "").strip().lower()
+    cat = str(category or "").strip()
+    try:
+        min_size = max(0, float(min_size_mb)) * 1024 * 1024
+    except (TypeError, ValueError):
+        min_size = 0
+    try:
+        cap = max(1, min(20, int(limit)))
+    except (TypeError, ValueError):
+        cap = 20
+    matched = []
+    for it in items:
+        if kw and kw not in it.get("name", "").lower() and kw not in it.get("rel", "").lower():
+            continue
+        if ex and not it.get("name", "").lower().endswith(ex if ex.startswith(".") else "." + ex):
+            continue
+        if cat and it.get("cat") != cat:
+            continue
+        if it.get("size", 0) < min_size:
+            continue
+        matched.append({
+            "name": it.get("name"), "path": it.get("path"), "rel": it.get("rel"),
+            "cat": it.get("cat"), "size": it.get("size"), "mtime": it.get("mtime"),
+        })
+        if len(matched) >= cap:
+            break
+    return _ok("找到 %d 个匹配视频" % len(matched), items=matched, limit=cap,
+               total_scanned=len(items))
+
+
+def scan_assets(force=False):
+    """刷新资产库索引，只回灌统计摘要。"""
+    import assets
+    try:
+        result = assets.scan(include_duration=True, force=bool(force))
+    except Exception as e:
+        return _fail("资产扫描失败：" + str(e)[:200], error_code="asset_scan_failed")
+    stats = result.get("data", {}).get("stats", {})
+    return _ok(result.get("message", "资产扫描完成"),
+               total=stats.get("total", 0), total_gb=stats.get("total_gb", 0),
+               categories=stats.get("cats", {}))
+
+
+def reveal_asset(path):
+    """在文件管理器中定位资产库内视频。"""
+    import assets
+    return assets.locate(path)
+
+
+def move_asset(src, dest):
+    """移动/重命名资产库内视频；目标必须仍在 ROOT 内且不覆盖。"""
+    source = _safe_media_file(src)
+    target = _safe_dest_file(dest)
+    if not source:
+        return _fail("源文件无效或不在资产目录内", error_code="bad_source")
+    if not target:
+        return _fail("目标无效、不在资产目录内或已存在（禁止覆盖）", error_code="bad_destination")
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        os.replace(source, target)
+        return _ok("已移动", src=source, dest=target)
+    except OSError as e:
+        return _fail("移动失败：" + str(e)[:200], error_code="move_failed")
+
+
+def copy_asset(src, dest):
+    """复制资产库内视频；目标必须仍在 ROOT 内且不覆盖。"""
+    import shutil
+    source = _safe_media_file(src)
+    target = _safe_dest_file(dest)
+    if not source:
+        return _fail("源文件无效或不在资产目录内", error_code="bad_source")
+    if not target:
+        return _fail("目标无效、不在资产目录内或已存在（禁止覆盖）", error_code="bad_destination")
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copy2(source, target)
+        return _ok("已复制", src=source, dest=target)
+    except OSError as e:
+        return _fail("复制失败：" + str(e)[:200], error_code="copy_failed")
+
+
+def trash_asset(path):
+    """移入应用内回收站，记录原路径；不做永久删除。"""
+    import shutil, json, time
+    source = _safe_media_file(path)
+    if not source:
+        return _fail("文件无效或不在资产目录内", error_code="bad_source")
+    trash = _trash_dir()
+    try:
+        os.makedirs(trash, exist_ok=True)
+        name = "%d_%s" % (int(time.time() * 1000), os.path.basename(source))
+        dest = os.path.join(trash, name)
+        meta = {"name": name, "src": source, "trashed_at": time.time()}
+        with open(dest + ".json", "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False)
+        shutil.move(source, dest)
+        return _ok("已移入回收站，可恢复", name=name, src=source, trash=dest)
+    except OSError as e:
+        return _fail("移入回收站失败：" + str(e)[:200], error_code="trash_failed")
+
+
+def list_trashed():
+    """列出应用内回收站项目，只返回项目名、原路径和删除时间。"""
+    trash = _trash_dir()
+    if not os.path.isdir(trash):
+        return _ok("回收站为空", items=[])
+    items = []
+    for name in sorted(os.listdir(trash)):
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(trash, name), encoding="utf-8") as f:
+                meta = json.load(f)
+        except (OSError, ValueError):
+            continue
+        items.append({"name": meta.get("name") or name[:-5],
+                      "src": meta.get("src", ""),
+                      "trashed_at": meta.get("trashed_at", 0)})
+    return _ok("回收站共 %d 项" % len(items), items=items)
+
+
+def restore_asset(name):
+    """从应用内回收站恢复到原路径；目标被占用时拒绝覆盖。"""
+    import shutil, json
+    if not isinstance(name, str) or not name or name in (".", "..") or "/" in name or "\\" in name:
+        return _fail("回收站项目名无效", error_code="bad_name")
+    trash = _trash_dir()
+    item = os.path.join(trash, name)
+    meta_path = item + ".json"
+    if not os.path.isfile(item) or not os.path.isfile(meta_path):
+        return _fail("回收站中找不到该项目", error_code="not_found")
+    try:
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+        original = meta.get("src")
+        if not isinstance(original, str) or os.path.exists(original):
+            return _fail("原路径已不存在或已被占用，未覆盖", error_code="restore_blocked")
+        root = os.path.realpath(config.ROOT)
+        if os.path.commonpath([os.path.realpath(original), root]) != root:
+            return _fail("原路径不在资产目录内，未恢复", error_code="restore_blocked")
+        os.makedirs(os.path.dirname(original), exist_ok=True)
+        shutil.move(item, original)
+        os.remove(meta_path)
+        return _ok("已从回收站恢复", path=original)
+    except (OSError, ValueError) as e:
+        return _fail("恢复失败：" + str(e)[:200], error_code="restore_failed")
+
+
+_ORGANIZE_PREVIEWS = {}
+_ORGANIZE_LOCK = threading.Lock()
+_ORGANIZE_SEQ = itertools.count(1)
+
+
+def organize_preview(rule, category=None, value=None, limit=200):
+    """生成批量整理预览，不改动文件。"""
+    import assets
+    rule = str(rule or "").strip().lower()
+    if rule not in ("ext", "date", "size", "category"):
+        return _fail("规则只能是 ext/date/size/category", error_code="bad_rule")
+    try:
+        scan = assets.scan(include_duration=False)
+        items = scan.get("data", {}).get("items", [])
+    except Exception as e:
+        return _fail("资产扫描失败：" + str(e)[:200], error_code="asset_scan_failed")
+    try:
+        cap = max(1, min(200, int(limit)))
+    except (TypeError, ValueError):
+        cap = 200
+    if rule == "ext" and category:
+        wanted = "." + str(category).lstrip(".")
+        items = [i for i in items if str(i.get("name", "")).lower().endswith(wanted.lower())]
+    if rule == "category" and category:
+        items = [i for i in items if i.get("cat") == category]
+    changes = []
+    seen = set()
+    root = os.path.realpath(config.ROOT)
+    for it in items[:cap]:
+        src = _safe_media_file(it.get("path", ""))
+        if not src or src in seen:
+            continue
+        seen.add(src)
+        name = os.path.basename(src)
+        if rule == "ext":
+            folder = str(category or "按格式").lstrip(".").upper() or "按格式"
+        elif rule == "date":
+            import datetime
+            folder = datetime.datetime.fromtimestamp(it.get("mtime", 0)).strftime("%Y-%m")
+        elif rule == "size":
+            size = it.get("size", 0)
+            folder = "大于1GB" if size >= 2**30 else ("100MB-1GB" if size >= 100 * 2**20 else "小于100MB")
+        else:
+            folder = str(it.get("cat") or "未分类")
+        if value:
+            folder = os.path.join(str(value).strip("/\\"), folder)
+        dest = os.path.join(root, folder, name)
+        parent = os.path.realpath(os.path.dirname(dest))
+        if os.path.commonpath([parent, root]) != root or os.path.exists(dest):
+            continue
+        changes.append({"src": src, "dest": dest, "folder": folder})
+    if not changes:
+        return _fail("没有可整理的视频，可能目标已存在或规则无匹配", error_code="no_changes")
+    preview_id = "p%s" % next(_ORGANIZE_SEQ)
+    with _ORGANIZE_LOCK:
+        _ORGANIZE_PREVIEWS[preview_id] = {"changes": changes, "expires": time.time() + 300}
+        expired = [k for k, v in _ORGANIZE_PREVIEWS.items() if v["expires"] < time.time()]
+        for k in expired:
+            _ORGANIZE_PREVIEWS.pop(k, None)
+    return _ok("已生成整理预览，共 %d 项" % len(changes), preview_id=preview_id,
+               changes=[{"src": c["src"], "dest": c["dest"]} for c in changes[:20]],
+               total=len(changes))
+
+
+def organize_apply(preview_id):
+    """按一次性预览批量执行；不做覆盖。"""
+    with _ORGANIZE_LOCK:
+        preview = _ORGANIZE_PREVIEWS.pop(str(preview_id), None)
+    if not preview or preview["expires"] < time.time():
+        return _fail("预览已过期或不存在，请重新生成", error_code="preview_expired")
+    moved = []
+    failed = []
+    for change in preview["changes"]:
+        try:
+            parent = os.path.realpath(os.path.dirname(change["dest"]))
+            root = os.path.realpath(config.ROOT)
+            if os.path.commonpath([parent, root]) != root or os.path.exists(change["dest"]):
+                failed.append({"src": change["src"], "error": "目标无效或已存在"})
+                continue
+            os.makedirs(parent, exist_ok=True)
+            os.replace(change["src"], change["dest"])
+            moved.append(change["dest"])
+        except OSError as e:
+            failed.append({"src": change["src"], "error": str(e)[:120]})
+    return _ok("批量整理完成：成功 %d，失败 %d" % (len(moved), len(failed)),
+               moved=moved[:20], failed=failed[:20], success_count=len(moved), fail_count=len(failed))
 
 
 # ============ B站下载 ============

@@ -31,3 +31,10 @@ def test_bg_task_emits_done_on_exception():
             return
         time.sleep(0.02)
     raise AssertionError("未收到 site_login_done 事件")
+
+
+def test_retry_tool_blocks_planning_tools():
+    api = main.Api()
+    assert api.retry_tool("ask_choice", {})["ok"] is False
+    assert api.retry_tool("make_plan", {})["ok"] is False
+    assert api.retry_tool("get_state", {})["ok"] is False

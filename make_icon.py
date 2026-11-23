@@ -1,7 +1,7 @@
-"""生成应用图标 assets/app.ico（圆角石墨底 + 绿色下载箭头 + 进度托盘）。
+"""统一生成程序图标与网页 Logo（圆角石墨底 + 绿色下载箭头 + 进度托盘）。
 
 用法：python make_icon.py
-仅首次或改设计时运行；产物已被 build.py 引用，打包时自动带上。
+仅首次或改设计时运行；产物已被 build.py 与 web/index.html 引用，打包时自动带上。
 """
 import os
 
@@ -9,6 +9,7 @@ from PIL import Image, ImageDraw
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "assets", "app.ico")
+WEB_ICON = os.path.join(HERE, "web", "favicon.png")
 
 # 主题色与 style-graphite.css 一致
 BG = (32, 36, 43, 255)        # 石墨深底 #20242B
@@ -57,7 +58,9 @@ def main():
         build_once(512).save(icns, format="ICNS")
         png = os.path.join(os.path.dirname(OUT), "app_256.png")
         build_once(256).save(png, format="PNG")
-        print("已生成 macOS icns 与 Linux png 图标")
+        os.makedirs(os.path.dirname(WEB_ICON), exist_ok=True)
+        build_once(256).save(WEB_ICON, format="PNG")
+        print("已生成 macOS icns、Linux png 与 web/favicon.png 图标")
     except Exception as e:
         print("[warn] icns/png 生成失败（不影响 Windows 打包）：", e)
 

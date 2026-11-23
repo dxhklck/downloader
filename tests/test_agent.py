@@ -1,4 +1,6 @@
 """Agent 工具派发与参数白名单测试。"""
+import json
+import os
 from types import SimpleNamespace
 
 import agent
@@ -113,3 +115,63 @@ def test_malformed_arguments_are_rejected(monkeypatch):
     a.chat("进度")
     results = [data for event, data in events if event == "result"]
     assert results[0]["success"] is False
+
+
+def test_dynamic_context_has_no_secrets(monkeypatch):
+    monkeypatch.setattr(agent.config, "llm_params", lambda: ("secret-key", "url", "model"))
+    monkeypatch.setattr(agent.tools, "get_state", lambda: {"task": "", "done": 0,
+                                                            "total": 0, "queue": []})
+    monkeypatch.setattr(agent.tools, "get_login_status", lambda: {"bili": {"status": "ok"}})
+    text = agent._dynamic_context()
+    assert "secret-key" not in text
+    assert "bili=ok" in text
+
+
+def test_clip_history_keeps_recent_messages():
+    history = []
+    for i in range(20):
+        history.append({"role": "user", "content": "旧消息 %d" % i})
+        history.append({"role": "assistant", "content": "回复 %d" % i})
+    clipped = agent._clip_history(history)
+    full_turns = [m for m in clipped if "此前对话摘要" not in str(m.get("content"))]
+    assert "旧消息 0" not in " ".join(str(m["content"]) for m in full_turns)
+    assert "旧消息 19" in " ".join(str(m["content"]) for m in full_turns)
+    assert any("此前对话摘要" in str(m.get("content")) for m in clipped)
+
+
+def test_large_tool_result_is_saved_with_preview(tmp_path, monkeypatch):
+    monkeypatch.setattr(agent.config, "_APP_DIR", str(tmp_path))
+    text = agent._result_str({"success": True, "message": "ok", "data": {"blob": "x" * 5000}})
+    payload = json.loads(text)
+    assert payload["data"]["truncated"] is True
+    assert os.path.isfile(payload["data"]["file"])
+
+
+def test_api_error_is_retried_once(monkeypatch):
+    class FailOnce:
+        def __init__(self):
+            self.calls = 0
+
+        @property
+        def chat(self):
+            return self
+
+        @property
+        def completions(self):
+            return self
+
+        def create(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("timeout")
+            return _completion(content="恢复成功")
+
+    client = FailOnce()
+    monkeypatch.setattr(agent, "OpenAI", lambda **kwargs: client)
+    monkeypatch.setattr(agent, "config", SimpleNamespace(
+        llm_params=lambda: ("key", "https://api.test", "model")))
+    events = []
+    a = agent.Agent(lambda event, data: events.append((event, data)))
+    a.chat("下载")
+    assert client.calls == 2
+    assert any(event == "msg" and data == "恢复成功" for event, data in events)

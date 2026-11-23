@@ -96,6 +96,12 @@ class Api:
 
     def _run_tool(self, name, args):
         """只执行 Agent 已声明的工具：重试入口也不绕过白名单。"""
+        import time
+        job_id = self._current_job["id"]
+        tool_call_id = "retry_%s_%s" % (job_id, name)
+        started = time.monotonic()
+        self._emit("tool", {"name": name, "args": args, "job_id": job_id,
+                            "tool_call_id": tool_call_id, "status": "running"})
         fn = FUNCS.get(name)
         if not callable(fn):
             result = {"success": False, "message": f"未知工具：{name}"}
@@ -110,7 +116,9 @@ class Api:
                 result = fn(**call_args)
             except Exception as e:
                 result = self._err(e)
-        self._emit("tool", {"name": name, "args": args, "job_id": self._current_job["id"]})
+        elapsed = int((time.monotonic() - started) * 1000)
+        self._emit("tool_done", {"name": name, "status": "ok" if result.get("success") else "error",
+                                 "tool_call_id": tool_call_id, "elapsed_ms": elapsed})
         self._emit("result", result)
         if ("download" in name or "random" in name) and (result.get("success") or result.get("cancelled")):
             enabled = config.load().get("notify_on_complete", False)
@@ -122,10 +130,21 @@ class Api:
         job_id = self._enqueue("chat", text=text)
         return {"ok": True, "id": job_id, "message": "已加入队列"}
 
+    def answer_choice(self, answer_id, value):
+        """前端选择题回调：把用户选择送回等待中的 Agent 工具。"""
+        return self.agent.answer_choice(answer_id, value)
+
+    def confirm_organize(self, preview_id, confirmed=False):
+        """批量整理确认：未确认时不执行；确认后走队列重放预览 id。"""
+        if not confirmed:
+            return {"ok": False, "message": "用户未确认，未执行整理"}
+        return self.retry_tool("organize_apply", {"preview_id": preview_id})
+
     def retry_tool(self, name, args):
         """失败工具重试：与对话共用同一队列，禁止越权重放任意函数。"""
+        from agent import NO_RETRY_TOOLS
         base = str(name).split(".")[-1]
-        if base not in self._allowed_tools or base == "get_state":
+        if base not in self._allowed_tools or base in NO_RETRY_TOOLS:
             return {"ok": False, "message": f"该工具不支持重试：{name}"}
         if not isinstance(args, dict):
             return {"ok": False, "message": "重试参数格式不正确"}
@@ -179,6 +198,33 @@ class Api:
 
     def asset_locate(self, path):
         return assets.locate(path)
+
+    def asset_trash(self, path):
+        """移入应用内回收站，可恢复；不做永久删除。"""
+        return tools.trash_asset(path)
+
+    def asset_trash_batch(self, paths):
+        """批量移入回收站，逐个处理并汇总成功/失败。"""
+        if not isinstance(paths, list) or not paths:
+            return {"success": False, "message": "请先选择视频", "data": {"ok": 0, "failed": 0}}
+        ok, failed = 0, []
+        for path in paths:
+            result = tools.trash_asset(path)
+            if result.get("success"):
+                ok += 1
+            else:
+                failed.append({"path": path, "message": result.get("message", "删除失败")})
+        msg = "已移入回收站 %d 个" % ok
+        if failed:
+            msg += "，失败 %d 个" % len(failed)
+        return {"success": ok > 0, "message": msg,
+                "data": {"ok": ok, "failed": failed}}
+
+    def asset_restore(self, name):
+        return tools.restore_asset(name)
+
+    def asset_trashed(self):
+        return tools.list_trashed()
 
     def check_llm(self):
         """测试 LLM 是否可用（发一条最小请求）。"""
@@ -251,6 +297,20 @@ class Api:
         return {"ok": True, "root": config.ROOT, "dir_bili": config.DIR_BILI,
                 "dir_douyin": config.DIR_DOUYIN}
 
+    def get_version_info(self):
+        """返回当前版本与运行环境，供设置页“关于”展示。"""
+        import platform
+        info = updater.build_info()
+        return {
+            "ok": True,
+            "version": updater.current_version(),
+            "author": info.get("author", ""),
+            "author_url": info.get("author_url", ""),
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "root": config.ROOT,
+        }
+
     def check_update(self):
         """检查 GitHub Release 是否有新版本。"""
         return updater.check_update()
@@ -265,6 +325,31 @@ class Api:
         try:
             webbrowser.open(url)
             return {"ok": True}
+        except Exception as e:
+            return self._err(e)
+
+    def install_update(self, path):
+        """运行已下载的安装包；只处理下载目录里的更新产物。"""
+        import os
+        downloads = os.path.realpath(os.path.join(os.path.expanduser("~"), "Downloads"))
+        candidate = os.path.realpath(str(path or ""))
+        if not os.path.isfile(candidate):
+            return {"ok": False, "message": "安装包不存在，请重新下载"}
+        if os.path.dirname(candidate) != downloads:
+            return {"ok": False, "message": "安装包路径无效，请重新下载"}
+        ext = os.path.splitext(candidate)[1].lower()
+        if ext not in (".exe", ".dmg", ".deb"):
+            return {"ok": False, "message": "不支持的安装包格式"}
+        try:
+            if sys.platform == "win32":
+                os.startfile(candidate)
+            elif sys.platform == "darwin":
+                import subprocess
+                subprocess.Popen(["open", candidate])
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", candidate])
+            return {"ok": True, "message": "已启动安装包，请按提示完成更新"}
         except Exception as e:
             return self._err(e)
 

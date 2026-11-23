@@ -15,9 +15,28 @@ API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 TIMEOUT = 10
 
 
+def build_info():
+    """读取打包时写入的构建信息；源码模式未提供时回退到 build.py。"""
+    import json
+    import config
+    path = os.path.join(config._RES_DIR, "assets", "build_info.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and data.get("version"):
+            return data
+    except (OSError, ValueError, TypeError):
+        pass
+    return {
+        "version": build.APP_VERSION,
+        "author": build.AUTHOR,
+        "author_url": build.AUTHOR_URL,
+    }
+
+
 def current_version():
     """返回形如 1.0.6 的当前版本（构建里的 1.0.6.0 去掉末位）。"""
-    parts = build.APP_VERSION.split(".")
+    parts = str(build_info().get("version") or build.APP_VERSION).split(".")
     return ".".join(parts[:3])
 
 

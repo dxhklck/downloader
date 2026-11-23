@@ -40,3 +40,100 @@ def test_get_login_status_never_returns_cookie_values(tmp_path, monkeypatch):
     status = tools.get_login_status()
     assert status["bili"]["status"] == "ok"
     assert "secret" not in repr(status)
+
+
+def test_create_folder_rejects_escape(tmp_path, monkeypatch):
+    monkeypatch.setattr(tools.config, "ROOT", str(tmp_path))
+    assert tools.create_folder("..\\outside")["success"] is False
+    assert tools.create_folder("C:/Windows/Temp")["success"] is False
+    assert not (tmp_path.parent / "outside").exists()
+
+
+def test_create_folder_allows_safe_relative_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(tools.config, "ROOT", str(tmp_path))
+    result = tools.create_folder("动漫/2026/TEST")
+    assert result["success"] is True
+    assert (tmp_path / "动漫" / "2026" / "TEST").is_dir()
+
+
+def test_asset_search_caps_results(tmp_path, monkeypatch):
+    import assets
+    root = tmp_path / "videos"
+    root.mkdir()
+    for i in range(30):
+        (root / ("v%02d.mp4" % i)).write_bytes(b"x")
+    monkeypatch.setattr(tools.config, "ROOT", str(tmp_path))
+    monkeypatch.setattr(assets, "scan", lambda **kw: {"success": True, "message": "ok", "data": {
+        "items": [{"name": "v%02d.mp4" % i, "path": str(root / ("v%02d.mp4" % i)),
+                   "rel": "videos/v%02d.mp4" % i, "cat": "videos", "size": 1, "mtime": 0}
+                  for i in range(30)], "stats": {}, "scanned_at": 0}})
+    result = tools.asset_search(ext=".mp4", limit=100)
+    assert result["success"] is True
+    assert len(result["data"]["items"]) == 20
+    assert result["data"]["limit"] == 20
+
+
+def test_move_and_copy_asset_inside_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(tools.config, "ROOT", str(tmp_path))
+    src = tmp_path / "a.mp4"
+    src.write_bytes(b"video")
+    assert tools.copy_asset(str(src), str(tmp_path / "sub" / "copy.mp4"))["success"] is True
+    assert (tmp_path / "sub" / "copy.mp4").read_bytes() == b"video"
+    assert tools.move_asset(str(src), str(tmp_path / "sub" / "moved.mp4"))["success"] is True
+    assert not src.exists()
+
+
+def test_file_operations_reject_escape_and_overwrite(tmp_path, monkeypatch):
+    other = tmp_path.parent / "outside.mp4"
+    other.write_bytes(b"x")
+    monkeypatch.setattr(tools.config, "ROOT", str(tmp_path))
+    media = tmp_path / "one.mp4"
+    media.write_bytes(b"x")
+    assert tools.move_asset(str(media), str(other))["success"] is False
+    target = tmp_path / "two.mp4"
+    target.write_bytes(b"x")
+    assert tools.copy_asset(str(media), str(target))["success"] is False
+
+
+def test_trash_and_restore_asset(tmp_path, monkeypatch):
+    monkeypatch.setattr(tools.config, "ROOT", str(tmp_path))
+    monkeypatch.setattr(tools.config, "_APP_DIR", str(tmp_path / "app"))
+    media = tmp_path / "one.mp4"
+    media.write_bytes(b"x")
+    trashed = tools.trash_asset(str(media))
+    assert trashed["success"] is True
+    assert not media.exists()
+    restored = tools.restore_asset(trashed["data"]["name"])
+    assert restored["success"] is True
+    assert media.exists()
+
+
+def test_list_trashed_asset(tmp_path, monkeypatch):
+    monkeypatch.setattr(tools.config, "ROOT", str(tmp_path))
+    monkeypatch.setattr(tools.config, "_APP_DIR", str(tmp_path / "app"))
+    assert tools.list_trashed()["data"]["items"] == []
+    media = tmp_path / "clip.mp4"
+    media.write_bytes(b"x")
+    trashed = tools.trash_asset(str(media))
+    listed = tools.list_trashed()
+    assert listed["success"] is True
+    assert [it["name"] for it in listed["data"]["items"]] == [trashed["data"]["name"]]
+
+
+def test_organize_preview_apply(tmp_path, monkeypatch):
+    import assets
+    monkeypatch.setattr(tools.config, "ROOT", str(tmp_path))
+    src = tmp_path / "a.mp4"
+    src.write_bytes(b"x")
+    monkeypatch.setattr(assets, "scan", lambda **kw: {"success": True, "message": "ok", "data": {
+        "items": [{"name": "a.mp4", "path": str(src), "rel": "a.mp4", "cat": "root",
+                   "size": 1, "mtime": 0, "dur": 0}], "stats": {}, "scanned_at": 0}})
+    preview = tools.organize_preview("ext", category="mp4")
+    assert preview["success"] is True
+    pid = preview["data"]["preview_id"]
+    assert src.exists()
+    applied = tools.organize_apply(pid)
+    assert applied["success"] is True
+    assert not src.exists()
+    assert (tmp_path / "MP4" / "a.mp4").exists()
+    assert tools.organize_apply(pid)["success"] is False

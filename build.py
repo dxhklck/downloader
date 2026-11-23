@@ -17,6 +17,8 @@
 import os, sys, shutil, subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+AUTHOR = "信息科技练老师"
+AUTHOR_URL = "https://space.bilibili.com/477558144"
 # 支持环境变量覆盖产物名与 dist 根目录（旧产物被占用/锁定时换名打包）
 APP_NAME = os.environ.get("BUILD_APP_NAME", "视频下载助手")
 _DIST_ROOT = os.environ.get("BUILD_DIST_ROOT", "dist")
@@ -83,6 +85,21 @@ def make_spec():
     return cmd
 
 
+def write_build_info():
+    """生成运行时构建信息：设置页展示的版本、作者和主页从这里读取。"""
+    import json
+    info = {
+        "version": APP_VERSION,
+        "author": AUTHOR,
+        "author_url": AUTHOR_URL,
+    }
+    path = os.path.join(HERE, "assets", "build_info.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(info, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    print("  已生成构建信息:", path)
+
+
 def write_version_file():
     """生成 PyInstaller 版本信息文件（exe 右键属性可见：产品名/版本/描述）。"""
     v = [int(x) for x in APP_VERSION.split(".")]
@@ -105,11 +122,11 @@ VSVersionInfo(
   kids=[
     StringFileInfo([
       StringTable('080404b0', [
-        StringStruct('CompanyName', '家庭自用'),
+        StringStruct('CompanyName', '{AUTHOR}'),
         StringStruct('FileDescription', '对话式视频下载工具：发链接或一句话即可下载 B站/抖音/微博等视频'),
         StringStruct('FileVersion', '{APP_VERSION}'),
         StringStruct('InternalName', '{APP_NAME}'),
-        StringStruct('LegalCopyright', '仅供个人与家庭学习使用'),
+        StringStruct('LegalCopyright', 'Copyright © {AUTHOR}'),
         StringStruct('OriginalFilename', '{APP_NAME}.exe'),
         StringStruct('ProductName', '{APP_NAME}'),
         StringStruct('ProductVersion', '{APP_VERSION}')
@@ -127,6 +144,7 @@ VSVersionInfo(
 def main():
     if not os.path.isfile(ICON):
         print("[warn] 缺少图标 assets/app.ico，运行 make_icon.py 生成")
+    write_build_info()
     write_version_file()
     print("[1/3] PyInstaller 打包...")
     cmd = make_spec()
