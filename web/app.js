@@ -706,6 +706,8 @@ function openPlayer(path, title) {
 let assetsData = [];
 let currentCat = "__all__";
 let assetSortDir = -1;
+let assetPage = 1;
+const ASSET_PAGE_SIZE = 100;
 
 function fmtSize(n) {
   if (n >= 2**30) return (n/2**30).toFixed(2) + ' GB';
@@ -743,13 +745,13 @@ function renderCats(stats) {
   const all = document.createElement('div');
   all.className = 'cat-item' + (currentCat==='__all__'?' active':'');
   all.innerHTML = '<span>全部</span><span class="cnt">'+stats.total+'</span>';
-  all.onclick = () => { currentCat='__all__'; renderCats(stats); renderAssets(); };
+  all.onclick = () => { currentCat='__all__'; assetPage=1; renderCats(stats); renderAssets(); };
   tree.appendChild(all);
   Object.entries(stats.cats || {}).forEach(([cat, v]) => {
     const d = document.createElement('div');
     d.className = 'cat-item' + (currentCat===cat?' active':'');
     d.innerHTML = '<span>'+escapeHtml(cat)+'</span><span class="cnt">'+v.count+'</span>';
-    d.onclick = () => { currentCat=cat; renderCats(stats); renderAssets(); };
+    d.onclick = () => { currentCat=cat; assetPage=1; renderCats(stats); renderAssets(); };
     tree.appendChild(d);
   });
   $('assetStats').innerHTML = '共 <b>'+stats.total+'</b> 个视频，<b>'+stats.total_gb+' GB</b>' +
@@ -759,7 +761,6 @@ function renderCats(stats) {
 function renderAssets() {
   const q = $('assetSearch').value.trim().toLowerCase();
   const sort = $('assetSort').value;
-  const ext = $('assetExt').value;
   const size = $('assetSize').value;
   const dur = $('assetDuration').value;
   const days = Number($('assetDate').value || 0);
@@ -767,7 +768,6 @@ function renderAssets() {
   let rows = assetsData.filter(x =>
     (currentCat==='__all__' || x.cat===currentCat) &&
     (!q || x.name.toLowerCase().includes(q) || x.rel.toLowerCase().includes(q)) &&
-    (!ext || x.name.toLowerCase().endsWith(ext)) &&
     (!size || (size==='small' && x.size < 100*2**20) ||
       (size==='medium' && x.size >= 100*2**20 && x.size <= 2**30) ||
       (size==='large' && x.size > 2**30)) &&
@@ -784,9 +784,11 @@ function renderAssets() {
     else v = a.mtime - b.mtime;
     return v * assetSortDir;
   });
+  const pages = Math.max(1, Math.ceil(rows.length / ASSET_PAGE_SIZE));
+  if (assetPage > pages) assetPage = pages;
+  const start = (assetPage - 1) * ASSET_PAGE_SIZE;
+  const shown = rows.slice(start, start + ASSET_PAGE_SIZE);
   const tbody = $('assetRows');
-  const CAP = 500;  // 渲染上限，防 2600 行全量建 DOM 卡顿
-  const shown = rows.slice(0, CAP);
   tbody.innerHTML = shown.map(x =>
     '<tr data-path="'+escapeHtml(x.path)+'">' +
     '<td><input type="checkbox" class="asset-check"></td>' +
@@ -794,29 +796,38 @@ function renderAssets() {
     '<td>'+escapeHtml(x.cat)+'</td>' +
     '<td class="num">'+fmtSize(x.size)+'</td>' +
     '<td class="num">'+fmtDur(x.dur)+'</td>' +
-    '<td class="num">'+fmtDate(x.mtime)+'</td>' +
-    '<td><button class="asset-del" data-asset-del="'+escapeHtml(x.path)+'" title="移入回收站">删除</button></td></tr>'
+    '<td class="num">'+fmtDate(x.mtime)+'</td></tr>'
   ).join('');
-  const more = rows.length > CAP ? ' · 仅显示前 '+CAP+' 行，请细化搜索' : '';
-  $('assetFooter').textContent = '显示 '+shown.length+' / '+assetsData.length+' 个 · 双击打开 · 右键定位文件 · 删除可恢复'+more;
+  $('assetFooter').textContent = '筛选 '+rows.length+' / '+assetsData.length+' 个 · 本页 '+shown.length+
+    ' 条 · 双击打开 · 右键定位文件 · 删除可恢复';
+  const pager = $('assetPager');
+  const nums = pageNumbers(assetPage, pages);
+  pager.innerHTML = '<button class="pager-btn" data-page="prev" ' + (assetPage===1?'disabled':'') + '>上一页</button>' +
+    nums.map((n) => n === '…'
+      ? '<span class="pager-ellipsis">…</span>'
+      : '<button class="pager-btn' + (n===assetPage?' active':'') + '" data-page="' + n + '">' + n + '</button>').join('') +
+    '<button class="pager-btn" data-page="next" ' + (assetPage===pages?'disabled':'') + '>下一页</button>';
+  pager.querySelectorAll('[data-page]').forEach((btn) => {
+    btn.onclick = () => {
+      const v = btn.dataset.page;
+      assetPage = v === 'prev' ? Math.max(1, assetPage - 1)
+        : v === 'next' ? Math.min(pages, assetPage + 1) : Number(v);
+      renderAssets();
+    };
+  });
+}
+
+function pageNumbers(current, total) {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  if (current <= 4) return [1, 2, 3, 4, 5, '…', total];
+  if (current >= total - 3) return [1, '…', total - 4, total - 3, total - 2, total - 1, total];
+  return [1, '…', current - 1, current, current + 1, '…', total];
 }
 
 function selectedAssets() {
   return Array.from($('assetRows').querySelectorAll('tr[data-path]'))
     .filter((tr) => tr.querySelector('.asset-check').checked)
     .map((tr) => tr.dataset.path);
-}
-
-function exportAssetCsv() {
-  const paths = selectedAssets();
-  if (!paths.length) { $('assetFooter').textContent = '请先勾选视频'; return; }
-  const csv = 'path\n' + paths.map((p) => '"' + p.replace(/"/g, '""') + '"').join('\n');
-  const blob = new Blob([csv], { type: 'text/csv' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'video_assets.csv';
-  a.click();
-  URL.revokeObjectURL(a.href);
 }
 
 function askConfirm(title, message, okText) {
@@ -872,12 +883,6 @@ async function deleteAssets(paths) {
 // 事件委托：只在 tbody 上绑一次，避免每次渲染绑定 2N 个监听器
 function initAssetEvents() {
   const tbody = $('assetRows');
-  tbody.addEventListener('click', (e) => {
-    const btn = e.target.closest('[data-asset-del]');
-    if (!btn) return;
-    e.stopPropagation();
-    deleteAssets([btn.dataset.assetDel]);
-  });
   tbody.addEventListener('dblclick', (e) => {
     const tr = e.target.closest('tr[data-path]');
     if (tr) openPlayer(tr.dataset.path, tr.querySelector('.fname').textContent);
@@ -893,7 +898,7 @@ function initAssetEvents() {
 let searchTimer = null;
 function debouncedSearch() {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(renderAssets, 200);
+  searchTimer = setTimeout(() => { assetPage = 1; renderAssets(); }, 200);
 }
 
 // ============ 主题切换 ============
@@ -923,7 +928,8 @@ onReady(async () => {
   $('rescanBtn').onclick = () => loadAssets(true);
   initAssetEvents();
   $('assetSearch').addEventListener('input', debouncedSearch);
-  ['assetExt','assetSize','assetDuration','assetDate'].forEach((id) => $(id).addEventListener('change', renderAssets));
+  ['assetSize','assetDuration','assetDate'].forEach((id) => $(id).addEventListener('change', () => { assetPage = 1; renderAssets(); }));
+  $('assetSort').addEventListener('change', () => { assetPage = 1; renderAssets(); });
   $('assetSelectAll').addEventListener('click', () => {
     const checks = $('assetRows').querySelectorAll('.asset-check');
     const shouldCheck = Array.from(checks).some((c) => !c.checked);
@@ -935,7 +941,6 @@ onReady(async () => {
     try { await navigator.clipboard.writeText(paths.join('\n')); $('assetFooter').textContent = '已复制 '+paths.length+' 条路径'; }
     catch (e) { $('assetFooter').textContent = '复制失败：' + friendlyError(e); }
   });
-  $('assetExportCsv').addEventListener('click', exportAssetCsv);
   $('assetDeleteSelected').addEventListener('click', () => deleteAssets(selectedAssets()));
   restoreHistory();
   $('clearChatBtn').addEventListener('click', clearHistory);

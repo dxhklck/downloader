@@ -95,31 +95,25 @@
         <div id="assetStats" class="asset-stats">加载中...</div>
         <div class="asset-controls">
           <input id="assetSearch" type="text" placeholder="搜索文件名...">
-          <select id="assetSort">
+          <select id="assetSort" aria-label="排序">
             <option value="mtime">最近修改</option>
             <option value="name">文件名</option>
             <option value="size">大小</option>
             <option value="dur">时长</option>
           </select>
-          <select id="assetExt">
-            <option value="">全部格式</option>
-            <option value=".mp4">mp4</option><option value=".mkv">mkv</option>
-            <option value=".avi">avi</option><option value=".mov">mov</option>
-            <option value=".flv">flv</option><option value=".webm">webm</option>
-          </select>
-          <select id="assetSize">
+          <select id="assetSize" aria-label="大小筛选">
             <option value="">全部大小</option>
             <option value="small">&lt; 100 MB</option>
             <option value="medium">100 MB - 1 GB</option>
             <option value="large">&gt; 1 GB</option>
           </select>
-          <select id="assetDuration">
+          <select id="assetDuration" aria-label="时长筛选">
             <option value="">全部时长</option>
             <option value="short">&lt; 5 分钟</option>
             <option value="medium">5 - 30 分钟</option>
             <option value="long">&gt; 30 分钟</option>
           </select>
-          <select id="assetDate">
+          <select id="assetDate" aria-label="日期筛选">
             <option value="">全部日期</option>
             <option value="7">最近 7 天</option>
             <option value="30">最近 30 天</option>
@@ -127,17 +121,19 @@
           </select>
           <button id="assetSelectAll" class="btn btn-ghost">全选本页</button>
           <button id="assetCopyPaths" class="btn btn-ghost">复制路径</button>
-          <button id="assetExportCsv" class="btn btn-ghost">导出 CSV</button>
           <button id="assetDeleteSelected" class="btn btn-ghost btn-danger">删除所选</button>
         </div>
       </div>
       <div class="asset-table-wrap">
         <table class="asset-table">
-          <thead><tr><th>选</th><th>文件名</th><th>分类</th><th>大小</th><th>时长</th><th>修改日期</th><th>操作</th></tr></thead>
+          <thead><tr><th>选</th><th>文件名</th><th>分类</th><th>大小</th><th>时长</th><th>修改日期</th></tr></thead>
           <tbody id="assetRows"></tbody>
         </table>
       </div>
-      <div id="assetFooter" class="asset-footer"></div>
+      <div class="asset-bottom">
+        <div id="assetFooter" class="asset-footer"></div>
+        <div id="assetPager" class="asset-pager"></div>
+      </div>
     </section>
   </div>
 

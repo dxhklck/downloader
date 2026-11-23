@@ -867,15 +867,18 @@ button { -webkit-appearance: none; appearance: none; }
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
-.asset-table .asset-del {
-  border: 1px solid transparent; border-radius: var(--radius-xs);
-  background: transparent; color: var(--text-muted);
-  font-size: var(--fs-12); padding: 4px 8px; cursor: pointer;
-  transition: color .15s ease, background-color .15s ease, border-color .15s ease;
-}
-.asset-table .asset-del:hover { color: var(--danger); background: var(--danger-soft); border-color: var(--danger-border); }
-.asset-table .asset-del:active { transform: translateY(0); }
+.asset-bottom { display: flex; flex-direction: column; gap: 6px; }
 .asset-footer { font-size: var(--fs-12); color: var(--text-muted); text-align: center; padding: 4px; }
+.asset-pager { display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: 6px; }
+.pager-btn {
+  min-width: 30px; height: 28px; padding: 0 8px;
+  border: 1px solid var(--border-subtle); border-radius: var(--radius-xs);
+  background: var(--bg-input); color: var(--text-secondary); font-size: var(--fs-12); cursor: pointer;
+}
+.pager-btn:hover:not(:disabled) { border-color: var(--border-strong); color: var(--text-primary); }
+.pager-btn.active { border-color: var(--primary-border); background: var(--primary-soft); color: var(--text-accent); }
+.pager-btn:disabled { opacity: .45; cursor: default; }
+.pager-ellipsis { color: var(--text-muted); font-size: var(--fs-12); padding: 0 2px; }
 
 /* ============================================================
    11. 焦点环（硬环，非辉光）
