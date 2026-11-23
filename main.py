@@ -9,6 +9,7 @@ import config
 import tools
 import assets
 import notify
+import updater
 from agent import Agent, FUNCS
 
 
@@ -249,6 +250,23 @@ class Api:
         """返回当前数据目录，供设置页展示/确认。"""
         return {"ok": True, "root": config.ROOT, "dir_bili": config.DIR_BILI,
                 "dir_douyin": config.DIR_DOUYIN}
+
+    def check_update(self):
+        """检查 GitHub Release 是否有新版本。"""
+        return updater.check_update()
+
+    def download_update(self, asset, page):
+        """下载更新包到用户下载目录（不自动安装）。"""
+        return updater.download_update(asset, page)
+
+    def open_external(self, url):
+        """在浏览器打开发布页（麒麟 ARM64 等无预编译包的场景）。"""
+        import webbrowser
+        try:
+            webbrowser.open(url)
+            return {"ok": True}
+        except Exception as e:
+            return self._err(e)
 
 
 def main():

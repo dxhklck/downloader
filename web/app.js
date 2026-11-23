@@ -418,6 +418,51 @@ async function importConfig() {
   catch (e) { showTest({ ok: false, message: friendlyError(e), detail: String(e) }); }
 }
 
+async function checkUpdate() {
+  const box = $('updateResult');
+  box.classList.remove('hidden');
+  box.className = 'update-result';
+  box.textContent = '正在检查更新...';
+  try {
+    const r = await api.check_update();
+    if (!r.ok) { box.className = 'update-result fail'; box.textContent = friendlyError(r.detail || r.message); return; }
+    window.updateInfo = r;
+    if (!r.has_update) {
+      box.className = 'update-result ok';
+      box.textContent = '当前已是最新版本（' + r.current + '）';
+      return;
+    }
+    box.textContent = '发现新版本 ' + r.latest + '：' + (r.note || (r.asset ? '可下载安装包：' + r.asset : '请到发布页下载'));
+    const download = document.createElement('button');
+    download.className = 'btn btn-ghost';
+    download.textContent = r.asset ? '下载安装包' : '打开发布页';
+    download.onclick = () => downloadUpdate();
+    box.appendChild(download);
+  } catch (e) {
+    box.className = 'update-result fail';
+    box.textContent = '检查更新失败：' + friendlyError(e);
+  }
+}
+
+async function downloadUpdate() {
+  const r = window.updateInfo;
+  const box = $('updateResult');
+  if (!r || !r.asset) {
+    if (r && r.page) api.open_external(r.page);
+    return;
+  }
+  box.textContent = '正在下载 ' + r.asset + ' ...';
+  try {
+    const d = await api.download_update(r.asset, r.page);
+    if (!d.ok) { box.className = 'update-result fail'; box.textContent = friendlyError(d.detail || d.message); return; }
+    box.className = 'update-result ok';
+    box.textContent = '已下载到：' + d.path + '。请手动运行安装包完成更新。';
+  } catch (e) {
+    box.className = 'update-result fail';
+    box.textContent = '下载失败：' + friendlyError(e);
+  }
+}
+
 function showTest(r) {
   const msg = r.ok ? r.message : friendlyError(r.detail || r.message);
   $('testResult').textContent = msg;
@@ -655,6 +700,7 @@ onReady(async () => {
   });
   $('saveBtn').addEventListener('click', saveSettings);
   $('testBtn').addEventListener('click', testLLM);
+  $('checkUpdateBtn').addEventListener('click', checkUpdate);
   $('refreshLoginBtn').addEventListener('click', refreshLoginStatus);
   $('exportConfigBtn').addEventListener('click', exportConfig);
   $('importConfigBtn').addEventListener('click', importConfig);

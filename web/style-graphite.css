@@ -634,6 +634,10 @@ button { -webkit-appearance: none; appearance: none; }
 .btn-primary:active:not(:disabled) { background: var(--primary-active); border-color: var(--primary-active); box-shadow: none; }
 .btn-primary:disabled { background: var(--primary-disabled); border-color: transparent; color: var(--primary-disabled-text); cursor: not-allowed; }
 
+.update-result { margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--bg-input); color: var(--text-primary); font-size: var(--fs-13); }
+.update-result.ok { color: var(--success); }
+.update-result.fail { color: var(--danger); }
+.update-result .btn { margin-top: 8px; }
 .test-result { font-size: var(--fs-12); min-height: 16px; line-height: var(--lh-normal); }
 .test-result.ok { color: var(--success); }
 .test-result.ok::before { content: "✓ "; }
