@@ -1324,6 +1324,56 @@ def _verify_merge(path):
         return False, f"校验异常({str(e)[:60]})"
 
 
+def search_videos(keyword, platform="all", count=8, out_dir=None, quality="best"):
+    """按关键词搜索视频，只返回候选列表，不下载；out_dir/quality 原样回传供界面下载用。"""
+    try:
+        import yt_dlp
+    except ImportError:
+        return _fail("缺少 yt-dlp 组件，无法搜索", error_code="search_failed")
+    if not isinstance(keyword, str) or not keyword.strip():
+        return _fail("请提供搜索关键词", error_code="bad_arguments")
+    keyword = keyword.strip()[:100]
+    try:
+        cap = max(1, min(12, int(count)))
+    except (TypeError, ValueError):
+        cap = 8
+    key = str(platform or "all").strip().lower()
+    prefix = {"bili": "bilisearch", "bilibili": "bilisearch", "b站": "bilisearch",
+              "youtube": "ytsearch", "yt": "ytsearch"}.get(key, "ytsearch")
+    opts = {
+        "quiet": True, "no_warnings": True, "extract_flat": True,
+        "skip_download": True, "playlistend": cap,
+        "socket_timeout": 30, "retries": 1,
+    }
+    px = config.proxy_url() or config.system_proxy_url()
+    if px:
+        opts["proxy"] = px
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info("%s%d:%s" % (prefix, cap, keyword), download=False)
+        items = []
+        for e in ((info or {}).get("entries") or [])[:cap]:
+            if not isinstance(e, dict):
+                continue
+            url = e.get("webpage_url") or e.get("url") or ""
+            if not isinstance(url, str) or not url.startswith("http"):
+                continue
+            items.append({
+                "title": str(e.get("title") or "无标题")[:160],
+                "url": url,
+                "id": str(e.get("id") or "")[:80],
+                "duration": int(e.get("duration") or 0),
+                "uploader": str(e.get("uploader") or "")[:80],
+            })
+        if not items:
+            return _fail("没有找到匹配的视频，试试更短的关键词", error_code="no_results")
+        return _ok("找到 %d 个候选视频，请在界面选择" % len(items),
+                   items=items, keyword=keyword, platform=key,
+                   out_dir=out_dir or "", quality=quality or "best")
+    except Exception as e:
+        return _fail("搜索失败：" + str(e)[:150], error_code="search_failed")
+
+
 def url_download(url, quality="best", out_dir=None):
     """按任意视频网页链接下载（YouTube/B站/抖音等 yt-dlp 支持的站点）。
 

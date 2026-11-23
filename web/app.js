@@ -178,6 +178,56 @@ function showChoice(data) {
   scrollChat();
 }
 
+function searchResultsCard(data) {
+  const div = document.createElement('div');
+  div.className = 'msg msg-agent';
+  const items = Array.isArray(data.items) ? data.items : [];
+  const meta = data.out_dir ? ' · 保存到 ' + data.out_dir : '';
+  const rows = items.map((it, i) =>
+    '<div class="search-result-row">' +
+    '<div class="search-result-title">' + (i + 1) + '. ' + escapeHtml(it.title || '无标题') + '</div>' +
+    '<div class="search-result-meta">' + escapeHtml(it.uploader || '未知上传者') +
+    (it.duration ? ' · ' + fmtDur(it.duration) : '') + '</div>' +
+    '<button class="btn btn-ghost search-result-btn" data-search-url="' + escapeHtml(it.url || '') +
+    '" data-search-index="' + i + '">下载</button></div>').join('');
+  div.innerHTML = '<div class="msg-avatar">助</div><div class="msg-body">' +
+    '<div class="search-card"><div class="search-card-head">搜索结果：' +
+    escapeHtml(data.keyword || '') + meta + '（选一个下载）</div>' +
+    '<div class="search-results">' + rows + '</div></div></div>';
+  div.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-search-url]');
+    if (!btn || btn.disabled) return;
+    const item = items[Number(btn.dataset.searchIndex)];
+    if (!item || !item.url) return;
+    btn.disabled = true;
+    btn.textContent = '已加入队列';
+    downloadChosen(item.url, data.out_dir, data.quality);
+  });
+  $('chatLog').appendChild(div);
+  scrollChat();
+  saveHistory();
+}
+
+async function downloadChosen(url, outDir, quality) {
+  const args = { url };
+  if (outDir) args.out_dir = outDir;
+  if (quality) args.quality = quality;
+  try {
+    const r = await api.retry_tool('url_download', args);
+    if (r && r.ok) {
+      const thinking = showThinking();
+      pendingJobs.add(r.id);
+      thinkingByJob.set(r.id, thinking);
+      refreshBusy();
+      addMessage('下载：' + url.slice(0, 60) + '（任务 #' + r.id + '）', 'user');
+    } else {
+      addResult({ success: false, message: (r && r.message) || '下载任务创建失败' });
+    }
+  } catch (e) {
+    addResult({ success: false, message: friendlyError(e), detail: String(e) });
+  }
+}
+
 function toolStatusCard(name, args, status) {
   const rows = Object.entries(args || {}).map(([k, v]) =>
     '<div class="tool-card-row"><span class="tool-card-key">' + escapeHtml(k) +
@@ -393,6 +443,9 @@ async function poll() {
           break;
         case 'organize_preview':
           organizeCard(ev.data);
+          break;
+        case 'search_results':
+          searchResultsCard(ev.data);
           break;
         case 'ask_choice': {
           const card = findToolCard(lastToolEventId);

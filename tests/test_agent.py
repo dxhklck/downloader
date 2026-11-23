@@ -10,7 +10,7 @@ import agent
 def test_system_prompt_enforces_platform_routing():
     """回归：用户提到 B站时不能误选抖音工具。"""
     assert "提到 B站就绝不能调用任何 douyin_ 工具" in agent.SYSTEM
-    assert "B站目前只支持按集下载" in agent.SYSTEM
+    assert "按主题/关键词搜索收集视频用 search_videos" in agent.SYSTEM
     douyin_desc = next(t["function"]["description"] for t in agent.TOOLS
                        if t["function"]["name"] == "douyin_random")
     assert "B站" in douyin_desc and "不能用" in douyin_desc
@@ -142,6 +142,26 @@ def test_bili_no_link_still_blocks_douyin_tool(monkeypatch):
     ])
     a.chat("B站随机下一首")
     assert called == []
+
+
+def test_bili_keyword_search_allowed_without_link(monkeypatch):
+    """用户说 B站 + 关键词时，search_videos 不应被平台硬路由拦截。"""
+    called = []
+
+    def fake_search(self, args):
+        called.append(args.get("keyword"))
+        self.emit("search_results", {"items": [], "keyword": "信息科技"})
+        return {"success": True, "message": "ok", "data": {"items": [], "keyword": "信息科技"}}
+
+    monkeypatch.setattr(agent.Agent, "_search_videos", fake_search)
+    a, events = _make_agent(monkeypatch, [
+        _completion([_tool_call("search_videos", '{"keyword": "信息科技", "platform": "bili"}')]),
+        _completion(),
+    ])
+    a.chat("B站收集一些信息科技课程")
+    assert called == ["信息科技"]
+    events_of_search = [data for event, data in events if event == "search_results"]
+    assert len(events_of_search) == 1
 
 
 def test_unknown_tool_is_reported(monkeypatch):

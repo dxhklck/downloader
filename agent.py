@@ -151,6 +151,25 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "search_videos",
+            "description": "按关键词跨平台搜索视频候选（B站/YouTube等），只列出结果不下载。用户说收集/找/搜某些主题或关键词的视频时用；结果会推给界面让用户点选下载。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string", "description": "搜索关键词，如 信息科技 互联网"},
+                    "platform": {"type": "string", "enum": ["all", "bili", "youtube"],
+                                 "description": "平台：all 默认、bili 哔哩哔哩、youtube；用户没指定就用 all"},
+                    "count": {"type": "integer", "description": "候选数量，默认8，最多12"},
+                    "out_dir": {"type": "string", "description": "可选：下载时保存的相对目录，界面会使用"},
+                    "quality": {"type": "string", "enum": ["best", "1080", "720"], "description": "下载画质，默认 best"},
+                },
+                "required": ["keyword"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "make_plan",
             "description": "把复杂请求拆成2-6步执行计划，界面会显示步骤卡。仅在需要多步操作时使用，不要用它代替实际工具。",
             "parameters": {
@@ -345,6 +364,7 @@ FUNCS = {
     "clean_temp": tools.clean_temp,
     "get_state": tools.get_state,
     "url_download": tools.url_download,
+    "search_videos": tools.search_videos,
     "make_plan": None,
     "ask_choice": None,
     "asset_stats": tools.asset_stats,
@@ -382,7 +402,7 @@ _PLATFORM_PREFIXES = (
     (("b站", "哔哩哔哩", "bilibili"), "bili_"),
     (("抖音", "douyin"), "douyin_"),
 )
-_PLATFORM_TOOLS = {"bili_status", "bili_download", "douyin_random", "douyin_login", "url_download"}
+_PLATFORM_TOOLS = {"bili_status", "bili_download", "douyin_random", "douyin_login", "url_download", "search_videos"}
 
 
 def _forced_platform(text):
@@ -403,6 +423,8 @@ def _tool_forbidden(forced, name, text=""):
         return False
     if name == "url_download" and _has_video_link(text):
         return False
+    if name == "search_videos":
+        return False
     return not name.startswith(forced)
 
 
@@ -412,15 +434,16 @@ SYSTEM = """你是视频下载助手。用户用中文告诉你要下载什么�
 没有明确平台时才按下面的默认规则处理。
 
 平台识别：
-- 提到 B站/哔哩哔哩/bilibili → 只能用 bili_ 工具（bili_download / bili_status）。B站目前只支持按集下载番剧，不支持随机/音乐/关键词下载；若用户要求"B站随机""B站下一首""B站唱歌"等，直接文字回复"B站目前只支持按集下载番剧，不支持随机或音乐筛选；请告诉我具体集数范围，或发视频链接用链接下载"，不要调用任何工具。
+- 提到 B站/哔哩哔哩/bilibili → 按集数下载番剧用 bili_ 工具；按主题/关键词搜索收集视频用 search_videos(platform='bili')，搜索后让用户点选，不要反复追问。
 - 提到抖音/douyin → 只能用 douyin_ 工具（douyin_random / douyin_login）。
 - 两个平台都没提 → 按默认规则（下面第 3、4 条）处理。
 
 默认规则：
 1. 用户给出 http:// 或 https:// 开头的网页链接（YouTube、B站、抖音、微博等任意网站）→ 一律调 url_download，把完整链接原样传给 url 参数；即使句子里提到 B站/抖音也同样用链接下载，不要调用按集或随机工具。用户说放到某目录 → 传 out_dir（相对资产根目录）；没说目录就不传 out_dir。
 2. 用户说下载番剧/集数（没给链接）→ 调 bili_download；集数范围从用户的话里提取。若只说剧名没给范围，先调 bili_status 查总集数再决定，不要臆测数字。
-3. 用户说随机刷/刷到什么下什么（没给链接，且没提 B站）→ 调 douyin_random，数量从话里提取。
-4. 用户说唱歌/音乐类（没给链接，且没提 B站）→ 调 douyin_random 并传 keywords=['唱歌','翻唱','现场','唱']。
+3. 用户要按主题/关键词收集、搜索、找视频（如"信息科技课程""互联网方面"）→ 调 search_videos，平台按用户说的选；用户没说平台就 platform='all'。搜索结果交给界面让用户点选下载，不要再追问关键词细节。
+4. 用户说随机刷/刷到什么下什么（没给链接、没主题关键词）→ 调 douyin_random，数量从话里提取。
+4a. 用户说唱歌/音乐类（没给链接）→ 调 douyin_random 并传 keywords=['唱歌','翻唱','现场','唱']。
 5. 用户问当前任务进度/下完没 → 调 get_state；问某部番剧总共下了多少集 → 调 bili_status。
 6. 用户说登录 → 调 douyin_login；但提到 B站登录时，文字回复"B站请在设置页通用登录里打开 bilibili.com 扫码"，不要调 douyin_login。
 7. 用户说清理 → 调 clean_temp。
@@ -434,6 +457,7 @@ SYSTEM = """你是视频下载助手。用户用中文告诉你要下载什么�
 13. 资产与文件夹工具与平台无关，不受 B站/抖音平台硬路由限制。
 14. 每次只返回一个工具调用，等结果后再决定下一步。任务完成后用简洁中文汇报结果。
 15. 如果工具返回失败（success=false），如实告诉用户原因，不要假装成功。
+16. 用户表达模糊时不要连续追问：有主题就先 search_videos 给候选；有链接就直接 url_download；只有完全没有可执行线索时才用 ask_choice 给2-4个选项。
 """
 
 
@@ -618,6 +642,18 @@ class Agent:
             result["message"] += "；请在界面确认后再执行"
         return result
 
+    def _search_videos(self, args):
+        result = _normalize_result(tools.search_videos(
+            keyword=args.get("keyword"),
+            platform=args.get("platform", "all"),
+            count=args.get("count", 8),
+            out_dir=args.get("out_dir"),
+            quality=args.get("quality", "best"),
+        ))
+        if result["success"]:
+            self.emit("search_results", result["data"])
+        return result
+
     def _execute_tool(self, name, args, forced, tool_call_id, user_text=""):
         import time
         started = time.monotonic()
@@ -636,6 +672,8 @@ class Agent:
             result = self._ask_choice(args)
         elif name == "organize_preview":
             result = self._organize_preview(args)
+        elif name == "search_videos":
+            result = self._search_videos(args)
         else:
             fn = FUNCS.get(name)
             if not callable(fn):

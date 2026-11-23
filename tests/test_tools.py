@@ -56,6 +56,38 @@ def test_url_download_rejects_unsafe_directory(tmp_path, monkeypatch):
     assert result["success"] is False
 
 
+def test_search_videos_returns_candidates_without_download(monkeypatch):
+    import sys
+    import types
+
+    class FakeYdl:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, query, download=False):
+            assert download is False
+            assert query.startswith("bilisearch8:")
+            return {"entries": [
+                {"title": "视频A", "url": "https://www.bilibili.com/video/BV1",
+                 "id": "BV1", "duration": 60, "uploader": "老师"},
+                {"title": "视频B", "webpage_url": "https://www.bilibili.com/video/BV2",
+                 "id": "BV2", "duration": 0, "uploader": ""},
+            ]}
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FakeYdl))
+    result = tools.search_videos("信息科技", platform="bili", count=8, out_dir="课程")
+    assert result["success"] is True
+    assert len(result["data"]["items"]) == 2
+    assert result["data"]["items"][0]["url"] == "https://www.bilibili.com/video/BV1"
+    assert result["data"]["out_dir"] == "课程"
+
+
 def test_site_login_rejects_bad_url():
     result = tools.site_login("ftp://example.com")
     assert result["success"] is False
