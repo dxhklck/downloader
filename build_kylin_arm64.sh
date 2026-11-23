@@ -2,13 +2,15 @@
 # 麒麟 V10 ARM64（飞腾/鲲鹏/海思）deb 构建脚本
 # 用法：把整个项目目录拷到麒麟机器，在项目根目录执行：
 #   bash build_kylin_arm64.sh
-# 产物：视频下载助手-1.0.4-kylin-arm64.deb（在当前目录）
+# 可指定版本：APP_VERSION=1.0.7 bash build_kylin_arm64.sh
+# 产物：视频下载助手-<版本>-kylin-arm64.deb（在当前目录）
 
 set -euo pipefail
 cd "$(dirname "$0")"
 
 APP_NAME="视频下载助手"
-VERSION="1.0.4"
+# 与 build.py 同源：默认用项目版本，环境变量可覆盖（如 CI 或发版时指定）
+VERSION="$(python3 -c 'import build; print(build.APP_VERSION)')"
 ARCH="arm64"
 OUT="视频下载助手-${VERSION}-kylin-${ARCH}.deb"
 

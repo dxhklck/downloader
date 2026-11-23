@@ -20,7 +20,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # 支持环境变量覆盖产物名与 dist 根目录（旧产物被占用/锁定时换名打包）
 APP_NAME = os.environ.get("BUILD_APP_NAME", "视频下载助手")
 _DIST_ROOT = os.environ.get("BUILD_DIST_ROOT", "dist")
-APP_VERSION = "1.0.0.0"          # 文件属性里的版本号（x.y.z.0）
+# 优先使用 CI 注入的 git tag 版本（如 v1.0.6 -> 1.0.6.0），本地默认 1.0.0.0
+APP_VERSION = os.environ.get("APP_VERSION", "1.0.0.0").strip().lstrip("v")
+if not all(part.isdigit() for part in APP_VERSION.split(".")):
+    raise ValueError(f"版本号只能包含数字和点：{APP_VERSION}")
+APP_VERSION = ".".join((APP_VERSION.split(".") + ["0", "0", "0"])[:4])
 ICON = os.path.join(HERE, "assets", "app.ico")
 VERSION_FILE = os.path.join(HERE, "assets", "version_info.txt")
 DIST = os.path.join(HERE, _DIST_ROOT, APP_NAME)
@@ -86,7 +90,7 @@ def write_version_file():
         v.append(0)
     vers = ",".join(str(x) for x in v[:4])
     txt = f"""# UTF-8
-# 自动生成于 build.py，勿手工编辑；改版本号请改 build.py 顶部 APP_VERSION
+# 自动生成于 build.py，勿手工编辑；版本号由 APP_VERSION 环境变量或默认值决定
 VSVersionInfo(
   ffi=FixedFileInfo(
     filevers=({vers}),
