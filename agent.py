@@ -3,7 +3,7 @@
 把用户的自然语言理解成工具调用，执行后把结果回灌模型，直到任务完成。
 API key 从 config.json 读取，不硬编码。
 """
-import json, os, threading, inspect, itertools, uuid
+import json, os, re, threading, inspect, itertools, uuid
 from datetime import date
 
 from openai import OpenAI
@@ -22,9 +22,9 @@ def _ok(msg, **data):
     return {"success": True, "message": msg, "data": data}
 
 
-def _fail(msg, error_code="tool_error", **data):
+def _fail(msg, error_code="tool_error", retryable=True, **data):
     return {"success": False, "message": msg, "error_code": error_code,
-            "retryable": True, "data": data}
+            "retryable": retryable, "data": data}
 
 
 def _normalize_result(result):
@@ -136,12 +136,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "url_download",
-            "description": "按视频网页链接下载任意网站的视频。用户给出 http:// 或 https:// 链接（如 YouTube、B站、抖音、微博等）时用这个工具，不要用 douyin_random。参数：url 必填；quality 可选 best/1080/720。",
+            "description": "按任意平台视频网页链接下载，含 B站/抖音/YouTube。用户给出 http:// 或 https:// 链接时用这个工具，不要用按集下载或随机下载。支持 out_dir 指定资产根目录下的保存目录。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "url": {"type": "string", "description": "完整的视频网页链接，以 http:// 或 https:// 开头"},
                     "quality": {"type": "string", "enum": ["best", "1080", "720"], "description": "画质档位，默认 best"},
+                    "out_dir": {"type": "string", "description": "可选：相对资产根目录的保存目录，如 B站comfyui；留空用 网络视频"},
                 },
                 "required": ["url"],
             },
@@ -365,6 +366,9 @@ CONFIRM_BEFORE = {"organize_apply"}
 # 这些工具由 Agent 自己处理，没有可重放的外部副作用。
 NO_RETRY_TOOLS = {"get_state", "make_plan", "ask_choice"}
 
+# 选择题不能诱导用户提供敏感信息；命中直接拒绝，不发起等待事件。
+_SENSITIVE_CHOICE_WORDS = ("api key", "apikey", "cookie", "密码", "token", "密钥")
+
 # 函数名 -> Schema 声明的参数名集合。LLM 只能传这些键，
 # 不能借函数签名里额外的可选参数（如 out_dir/ep_path）越权写路径。
 _SCHEMA_PARAMS = {
@@ -390,8 +394,14 @@ def _forced_platform(text):
     return None
 
 
-def _tool_forbidden(forced, name):
+def _has_video_link(text):
+    return bool(re.search(r"https?://", str(text or ""), re.I))
+
+
+def _tool_forbidden(forced, name, text=""):
     if not forced or name not in _PLATFORM_TOOLS:
+        return False
+    if name == "url_download" and _has_video_link(text):
         return False
     return not name.startswith(forced)
 
@@ -407,7 +417,7 @@ SYSTEM = """你是视频下载助手。用户用中文告诉你要下载什么�
 - 两个平台都没提 → 按默认规则（下面第 3、4 条）处理。
 
 默认规则：
-1. 用户给出 http:// 或 https:// 开头的网页链接（YouTube、B站、抖音、微博等任意网站）→ 一律调 url_download，把完整链接原样传给 url 参数。
+1. 用户给出 http:// 或 https:// 开头的网页链接（YouTube、B站、抖音、微博等任意网站）→ 一律调 url_download，把完整链接原样传给 url 参数；即使句子里提到 B站/抖音也同样用链接下载，不要调用按集或随机工具。用户说放到某目录 → 传 out_dir（相对资产根目录）；没说目录就不传 out_dir。
 2. 用户说下载番剧/集数（没给链接）→ 调 bili_download；集数范围从用户的话里提取。若只说剧名没给范围，先调 bili_status 查总集数再决定，不要臆测数字。
 3. 用户说随机刷/刷到什么下什么（没给链接，且没提 B站）→ 调 douyin_random，数量从话里提取。
 4. 用户说唱歌/音乐类（没给链接，且没提 B站）→ 调 douyin_random 并传 keywords=['唱歌','翻唱','现场','唱']。
@@ -554,6 +564,8 @@ class Agent:
             text = str(value)
             if text not in options:
                 return {"ok": False, "message": "请选择给出的选项", "options": options}
+            if entry["answer"] is not None:
+                return {"ok": False, "message": "该选项已提交，请勿重复回答"}
             entry["answer"] = text
             entry["event"].set()
         return {"ok": True, "message": "已记录选择", "answer": text}
@@ -563,7 +575,12 @@ class Agent:
         options = args.get("options") if isinstance(args.get("options"), list) else []
         options = [_shorten(x, 160) for x in options if str(x).strip()][:4]
         if len(options) < 2:
-            return _fail("选择题至少需要2个选项", error_code="bad_arguments")
+            return _fail("选择题至少需要2个选项", error_code="bad_arguments", retryable=False)
+        sensitive = "、".join(w for w in _SENSITIVE_CHOICE_WORDS
+                           if w in question.lower() or any(w in str(o).lower() for o in options))
+        if sensitive:
+            return _fail("选择题不能询问敏感信息（%s）" % sensitive,
+                         error_code="sensitive_choice", retryable=False)
 
         answer_id = "c%s" % next(self._choice_seq)
         event = threading.Event()
@@ -577,14 +594,14 @@ class Agent:
             with self._choice_lock:
                 self._choices.pop(answer_id, None)
         if not waited or not entry["answer"]:
-            return _fail("用户未选择，超时", error_code="timeout")
+            return _fail("用户未选择，超时", error_code="timeout", retryable=False)
         return _ok("用户选择了：" + entry["answer"], answer=entry["answer"], id=answer_id)
 
     def _make_plan(self, args):
         steps = args.get("steps") if isinstance(args.get("steps"), list) else []
         steps = [_shorten(x, 200) for x in steps if str(x).strip()][:6]
         if len(steps) < 2:
-            return _fail("执行计划至少需要2个步骤", error_code="bad_arguments")
+            return _fail("执行计划至少需要2个步骤", error_code="bad_arguments", retryable=False)
         self.plan = steps
         self.emit("plan", {"steps": steps})
         return _ok("已生成执行计划", steps=steps)
@@ -601,14 +618,14 @@ class Agent:
             result["message"] += "；请在界面确认后再执行"
         return result
 
-    def _execute_tool(self, name, args, forced, tool_call_id):
+    def _execute_tool(self, name, args, forced, tool_call_id, user_text=""):
         import time
         started = time.monotonic()
         self.emit("tool", {"name": name, "args": args, "status": "running",
-                           "tool_call_id": tool_call_id})
+                           "tool_call_id": tool_call_id, "elapsed_ms": 0})
         if not isinstance(args, dict):
             result = _fail("工具参数格式错误，请重新调用", error_code="bad_arguments")
-        elif _tool_forbidden(forced, name):
+        elif _tool_forbidden(forced, name, user_text):
             platform = "B站" if forced == "bili_" else "抖音"
             result = _fail(
                 f"用户明确指定{platform}，禁止调用 {name}。请改用{platform}的工具，或文字说明该平台不支持此需求。",
@@ -633,9 +650,11 @@ class Agent:
                     result = _fail(str(e)[:200], error_code="tool_exception")
         result = _normalize_result(result)
         elapsed = int((time.monotonic() - started) * 1000)
-        self.emit("tool_done", {"name": name, "status": "ok" if result["success"] else "error",
+        self.emit("tool_done", {"name": name, "args": args,
+                                "status": "ok" if result["success"] else "error",
                                 "tool_call_id": tool_call_id, "elapsed_ms": elapsed,
-                                "error_code": result["error_code"]})
+                                "error_code": result["error_code"],
+                                "retryable": result["retryable"]})
         return result
 
     @staticmethod
@@ -668,7 +687,7 @@ class Agent:
             except Exception as e:
                 if not retried and self._retryable_api_error(e):
                     retried = True
-                    self.emit("status", "模型请求失败，正在重试...")
+                    self.emit("status", "模型请求失败，正在重试；不要重复道歉，直接继续未完成任务")
                     continue
                 code = getattr(e, "status_code", None)
                 if code == 401:
@@ -702,7 +721,7 @@ class Agent:
                         raise ValueError("参数不是对象")
                 except Exception:
                     args = None
-                result = self._execute_tool(name, args, forced, tool_call_id)
+                result = self._execute_tool(name, args, forced, tool_call_id, user_text)
                 self.emit("result", {**result, "name": name, "tool_call_id": tool_call_id})
                 messages.append({
                     "role": "tool", "tool_call_id": tool_call_id,

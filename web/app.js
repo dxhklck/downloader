@@ -163,6 +163,7 @@ function showChoice(data) {
         const r = await api.answer_choice(answerId, value);
         if (r && r.ok) {
           box.classList.add('hidden');
+          setToolCardState(findToolCard(lastToolEventId), 'ok', '已选择');
           addMessage('已选择：' + value, 'user');
         } else {
           btn.disabled = false;
@@ -205,6 +206,25 @@ function addToolStatus(name, args) {
   saveHistory();
 }
 
+function findToolCard(id) {
+  if (!id) return null;
+  return Array.from($('chatLog').querySelectorAll('.tool-card[data-tool-name]'))
+    .find((n) => n.dataset.toolCallId === id && !n.dataset.toolDone) || null;
+}
+
+function setToolCardState(card, cls, text) {
+  if (!card) return;
+  const head = card.querySelector('.tool-card-head');
+  let state = head && head.querySelector('.tool-card-state');
+  if (!state && head) {
+    state = document.createElement('span');
+    head.appendChild(state);
+  }
+  if (!state) return;
+  state.className = 'tool-card-state ' + cls;
+  state.textContent = text;
+}
+
 function markToolStatus(result) {
   const cards = $('chatLog').querySelectorAll('.tool-card[data-tool-name]');
   let card = null;
@@ -217,15 +237,7 @@ function markToolStatus(result) {
   try { args = JSON.parse(card.dataset.toolArgs || '{}'); } catch (e) {}
   const ok = !!(result && result.success);
   card.dataset.toolDone = ok ? 'ok' : 'fail';
-  const head = card.querySelector('.tool-card-head');
-  if (head) {
-    const old = head.querySelector('.tool-card-state');
-    if (old) old.remove();
-    const state = document.createElement('span');
-    state.className = 'tool-card-state ' + (ok ? 'ok' : 'fail');
-    state.textContent = ok ? '完成' : '失败';
-    head.appendChild(state);
-  }
+  setToolCardState(card, ok ? 'ok' : 'fail', ok ? '完成' : '失败');
   if (!ok) {
     const argsBox = card.querySelector('.tool-card-args');
     const detail = result && (result.detail || result.message);
@@ -366,22 +378,13 @@ async function poll() {
           break;
         case 'tool_done':
           if (ev.data && ev.data.tool_call_id) {
-            const doneCard = Array.from($('chatLog').querySelectorAll(
-              '.tool-card[data-tool-call-id="' + CSS.escape(ev.data.tool_call_id) + '"]'))
-              .find((n) => !n.dataset.toolDone);
+            const doneCard = findToolCard(ev.data.tool_call_id);
             if (doneCard) {
-              doneCard.dataset.toolDone = ev.data.status;
-              const head = doneCard.querySelector('.tool-card-head');
-              let state = head && head.querySelector('.tool-card-state');
-              if (!state && head) {
-                state = document.createElement('span');
-                head.appendChild(state);
-              }
-              if (state) {
-                state.className = 'tool-card-state ' + (ev.data.status === 'ok' ? 'ok' : 'fail');
-                state.textContent = (ev.data.status === 'ok' ? '完成' : '失败') +
-                  (ev.data.elapsed_ms ? ' · ' + ev.data.elapsed_ms + 'ms' : '');
-              }
+              const done = ev.data.status === 'ok' || ev.data.status === 'error';
+              if (done) doneCard.dataset.toolDone = ev.data.status;
+              setToolCardState(doneCard, ev.data.status === 'ok' ? 'ok' : 'fail',
+                (ev.data.status === 'ok' ? '完成' : ev.data.status === 'error' ? '失败' : ev.data.status) +
+                (ev.data.elapsed_ms ? ' · ' + ev.data.elapsed_ms + 'ms' : ''));
             }
           }
           break;
@@ -391,9 +394,12 @@ async function poll() {
         case 'organize_preview':
           organizeCard(ev.data);
           break;
-        case 'ask_choice':
+        case 'ask_choice': {
+          const card = findToolCard(lastToolEventId);
+          if (card) setToolCardState(card, 'waiting', '等待选择');
           showChoice(ev.data);
           break;
+        }
         case 'status':
           if (runningJobId) clearThinking(runningJobId);
           addMessage(ev.data, 'agent');
@@ -407,10 +413,15 @@ async function poll() {
           else if (ev.data && ev.data.kind === 'chat' && runningJobId) endTurn(runningJobId);
           break;
         case 'xhs_login_done':
-        case 'site_login_done':
-          $('testResult').textContent = ev.data.message || (ev.data.success ? '登录成功，已记住' : '登录失败');
-          $('testResult').className = 'test-result ' + (ev.data.success ? 'ok' : 'fail');
+        case 'site_login_done': {
+          const box = $('siteLoginResult');
+          const text = ev.data.message || (ev.data.success ? '登录成功，已记住' : '登录失败');
+          if (box) { box.textContent = text; box.className = 'test-result ' + (ev.data.success ? 'ok' : 'fail'); }
+          $('siteLoginBtn').disabled = false;
+          $('confirmLoginBtn').disabled = false;
+          refreshLoginStatus();
           break;
+        }
         case 'state':
           updateState(ev.data);
           break;
@@ -573,10 +584,19 @@ async function refreshLoginStatus() {
     const r = await api.get_login_status();
     const label = { ok: '已登录', none: '未登录', unknown: '未知' };
     box.innerHTML = Object.entries(r).map(([k, v]) =>
-      '<div class="login-item"><b>' + escapeHtml(k) + '</b> ' + escapeHtml(label[v.status] || v.status) +
+      '<div class="login-item"><b>' + escapeHtml(v.label || k) + '</b> ' +
+      escapeHtml(label[v.status] || v.status) +
       (v.domains && v.domains.length ? ' (' + escapeHtml(v.domains.slice(0, 3).join(', ')) + ')' : '') +
       '</div>').join('');
   } catch (e) { box.textContent = '检测失败：' + friendlyError(e); }
+}
+
+function showBackupResult(r) {
+  const box = $('backupResult');
+  if (!box) return;
+  box.textContent = r.ok ? r.message : friendlyError(r.detail || r.message);
+  box.className = 'test-result ' + (r.ok ? 'ok' : 'fail');
+  box.title = !r.ok && r.detail ? r.detail : '';
 }
 
 async function exportConfig() {
@@ -589,15 +609,22 @@ async function exportConfig() {
     a.download = 'downloader-config.json';
     a.click();
     URL.revokeObjectURL(a.href);
-    showTest(r);
-  } catch (e) { showTest({ ok: false, message: friendlyError(e), detail: String(e) }); }
+    showBackupResult({ ok: r.ok, message: '配置已导出，API Key / Cookie 未包含' });
+  } catch (e) { showBackupResult({ ok: false, message: friendlyError(e), detail: String(e) }); }
 }
 
 async function importConfig() {
-  const text = prompt('粘贴之前导出的配置 JSON；API Key/Cookie 不会导入');
-  if (!text) return;
-  try { showTest(await api.import_config(text)); }
-  catch (e) { showTest({ ok: false, message: friendlyError(e), detail: String(e) }); }
+  const input = $('importConfigInput');
+  const text = input ? input.value.trim() : '';
+  if (!text) {
+    showBackupResult({ ok: false, message: '请先粘贴要导入的配置 JSON' });
+    return;
+  }
+  try {
+    const r = await api.import_config(text);
+    showBackupResult(r);
+    if (r && r.ok) input.value = '';
+  } catch (e) { showBackupResult({ ok: false, message: friendlyError(e), detail: String(e) }); }
 }
 
 async function checkUpdate() {
@@ -970,27 +997,43 @@ onReady(async () => {
   $('importConfigBtn').addEventListener('click', importConfig);
   // 统一登录入口：小红书网址自动走扫码识别，其他网站走通用登录
   $('siteLoginBtn').addEventListener('click', async () => {
-    const url = $('siteUrlInput').value.trim();
+    const input = $('siteUrlInput');
+    const box = $('siteLoginResult');
+    let url = input.value.trim();
+    if (!url) {
+      box.textContent = '请先填写网站首页地址';
+      box.className = 'test-result fail'; return;
+    }
     if (!/^https?:\/\//i.test(url)) {
-      $('testResult').textContent = '请先填写网站首页地址（以 http:// 或 https:// 开头）';
-      $('testResult').className = 'test-result fail'; return;
+      url = 'https://' + url;
+      input.value = url;
     }
     const isXhs = /xiaohongshu\.com|xhslink\.com/i.test(url);
-    $('testResult').textContent = isXhs
+    $('siteLoginBtn').disabled = true;
+    $('confirmLoginBtn').disabled = false;
+    box.textContent = isXhs
       ? '正在打开小红书窗口，扫码后自动记住（最长5分钟）...'
       : '正在打开登录窗口，登录完成后回来点「完成登录」...';
-    $('testResult').className = 'test-result';
+    box.className = 'test-result';
     try {
       const r = isXhs ? await api.xhs_login() : await api.site_login(url);
-      if (r && r.ok === false) { $('testResult').textContent = r.message; $('testResult').className = 'test-result fail'; }
-    } catch (e) { $('testResult').textContent = friendlyError(e); $('testResult').className = 'test-result fail'; }
+      if (r && r.ok === false) {
+        box.textContent = r.message; box.className = 'test-result fail';
+        $('siteLoginBtn').disabled = false;
+      }
+    } catch (e) {
+      box.textContent = friendlyError(e); box.className = 'test-result fail';
+      $('siteLoginBtn').disabled = false;
+    }
   });
   $('confirmLoginBtn').addEventListener('click', async () => {
+    const box = $('siteLoginResult');
     try {
       const r = await api.confirm_login();
-      $('testResult').textContent = r.message || (r.success ? '正在保存...' : '没有进行中的登录');
-      $('testResult').className = 'test-result ' + (r.success ? 'ok' : 'fail');
-    } catch (e) { $('testResult').textContent = friendlyError(e); $('testResult').className = 'test-result fail'; }
+      box.textContent = r.message || (r.success ? '正在保存...' : '没有进行中的登录');
+      box.className = 'test-result ' + (r.success ? 'ok' : 'fail');
+      $('confirmLoginBtn').disabled = !!r.success;
+    } catch (e) { box.textContent = friendlyError(e); box.className = 'test-result fail'; }
   });
   $('clearLogs').addEventListener('click', async () => {
     try {

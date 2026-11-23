@@ -22,8 +22,8 @@ AUTHOR_URL = "https://space.bilibili.com/477558144"
 # 支持环境变量覆盖产物名与 dist 根目录（旧产物被占用/锁定时换名打包）
 APP_NAME = os.environ.get("BUILD_APP_NAME", "视频下载助手")
 _DIST_ROOT = os.environ.get("BUILD_DIST_ROOT", "dist")
-# 优先使用 CI 注入的 git tag 版本（如 v1.0.6 -> 1.0.6.0），本地默认 1.0.0.0
-APP_VERSION = os.environ.get("APP_VERSION", "1.0.0.0").strip().lstrip("v")
+# 优先使用 CI 注入的 git tag 版本（如 v1.0.6 -> 1.0.6.0），本地默认当前版本
+APP_VERSION = os.environ.get("APP_VERSION", "1.0.7").strip().lstrip("v")
 if not all(part.isdigit() for part in APP_VERSION.split(".")):
     raise ValueError(f"版本号只能包含数字和点：{APP_VERSION}")
 APP_VERSION = ".".join((APP_VERSION.split(".") + ["0", "0", "0"])[:4])

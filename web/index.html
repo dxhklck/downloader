@@ -221,6 +221,7 @@
           </div>
           <div class="settings-card">
             <h3 class="card-title">登录新站点</h3>
+            <div id="siteLoginResult" class="test-result site-login-result"></div>
             <label class="field">
               <span class="field-label">站点首页</span>
               <input id="siteUrlInput" type="text" placeholder="粘贴网站首页，如 https://www.xiaohongshu.com">
@@ -229,7 +230,7 @@
               <button id="siteLoginBtn" class="btn btn-ghost">打开登录窗口</button>
               <button id="confirmLoginBtn" class="btn btn-ghost">完成登录</button>
             </div>
-            <span class="field-hint">打开窗口登录即可；小红书自动识别无需点「完成登录」，其他网站登录后点一下「完成登录」。登录态记住，之后发链接就能下</span>
+            <span class="field-hint">填 www.douyin.com 也可以，会自动补 https://。打开窗口登录后回来点「完成登录」；小红书扫码后自动识别，不用点。登录态会记住，之后发链接就能下。</span>
           </div>
         </section>
 
@@ -241,6 +242,11 @@
               <button id="exportConfigBtn" class="btn btn-ghost">导出配置</button>
               <button id="importConfigBtn" class="btn btn-ghost">导入配置</button>
             </div>
+            <label class="field">
+              <span class="field-label">粘贴配置 JSON（导入时使用）</span>
+              <textarea id="importConfigInput" rows="4" placeholder="把之前导出的 downloader-config.json 内容粘贴到这里"></textarea>
+            </label>
+            <div id="backupResult" class="test-result"></div>
           </div>
         </section>
 

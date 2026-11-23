@@ -3,8 +3,9 @@
 每个函数返回结构化 dict（success/message/data），不抛异常到调用层。
 进度通过可选的 progress 回调推送（GUI 用它更新界面）。
 """
-import os, sys, json, re, time, random, subprocess, urllib.request, threading, itertools
+import os, sys, json, re, time, random, sqlite3, subprocess, urllib.request, threading, itertools
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 import config
 import logutil
@@ -121,31 +122,86 @@ def _fail(msg, error_code="tool_error", **data):
             "retryable": True, "data": payload}
 
 
-def get_login_status():
-    """只读 Cookie 文件元信息，不返回任何 Cookie 值。"""
-    def domains(path):
-        if not os.path.isfile(path):
-            return None
-        found = set()
-        try:
-            with open(path, encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    if line.startswith("#") or not line.strip():
-                        continue
-                    parts = line.split("\t")
-                    if len(parts) >= 7:
-                        found.add(parts[0].lstrip(".").lower())
-        except OSError:
-            return None
-        return sorted(found)
+def _cookie_file_domains(path):
+    """只读 Cookie 文件域名，不返回 Cookie 值。"""
+    if not os.path.isfile(path):
+        return []
+    found = set()
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("#") or not line.strip():
+                    continue
+                parts = line.split("\t")
+                if len(parts) >= 7:
+                    found.add(parts[0].lstrip(".").lower())
+    except OSError:
+        return []
+    return sorted(found)
 
-    return {
-        "bili": {"status": "ok" if domains(config.COOKIE_BILI) else "none"},
-        "douyin": {"status": "ok" if domains(config.COOKIE_DOUYIN) else "none"},
-        "xhs": {"status": "ok" if domains(config.XHS_COOKIE_FILE) else "none"},
-        "site": {"status": "ok" if domains(config.COOKIES_FILE) else "none",
-                 "domains": domains(config.COOKIES_FILE) or []},
-    }
+
+def _browser_cookies(profile):
+    """从 Chromium 持久化 Profile 读取 (域名, 名称, 过期时间)，不读取 Cookie 值。"""
+    cookies = []
+    for db_name in ("Network/Cookies", "Cookies"):
+        db = Path(profile) / db_name
+        if not db.is_file():
+            continue
+        try:
+            src = sqlite3.connect("file:%s?mode=ro" % db.as_posix(), uri=True)
+            try:
+                rows = src.execute(
+                    "select host_key, name, expires_utc from cookies where length(encrypted_value) > 0 or length(value) > 0"
+                ).fetchall()
+                cookies.extend(rows)
+            finally:
+                src.close()
+            if cookies:
+                break
+        except (sqlite3.Error, OSError):
+            continue
+    return cookies
+
+
+def _live_cookie_check(profile, domains, names):
+    """按域名和关键 Cookie 名判断浏览器 Profile 是否仍有有效登录态。"""
+    now_chromium = int((time.time() + 11644473600) * 1_000_000)
+    for host, name, expires in _browser_cookies(profile):
+        if expires and expires < now_chromium:
+            continue
+        h = str(host or "").lstrip(".").lower()
+        n = str(name or "").lower()
+        if any(h == d or h.endswith("." + d) for d in domains) and n in names:
+            return True
+    return False
+
+
+def get_login_status():
+    """返回真实登录态；只读 Cookie 元信息，不读取或回传 Cookie 值。"""
+    checks = (
+        ("bili", "B站", (config.COOKIE_BILI, config.COOKIES_FILE),
+         ("bilibili.com",), {"sessdata", "bili_jct", "dedeuserid"},
+         (config.PROFILE_SITE,)),
+        ("douyin", "抖音", (config.COOKIE_DOUYIN, config.COOKIES_FILE),
+         ("douyin.com",), {"sessionid", "sessionid_ss", "sid_tt", "passport_csrf_token"},
+         (config.PROFILE_DOUYIN, config.PROFILE_SITE)),
+        ("xhs", "小红书", (config.XHS_COOKIE_FILE, config.COOKIES_FILE),
+         ("xiaohongshu.com", "xhslink.com"), {"web_session", "a1", "gid"},
+         (config.PROFILE_XHS, config.PROFILE_SITE)),
+    )
+    result = {}
+    for key, label, files, domains, names, profiles in checks:
+        has_key = _live_cookie_check(profiles[0], domains, names) if profiles else False
+        if not has_key:
+            has_key = any(
+                any(d in dom for dom in _cookie_file_domains(path) for d in domains)
+                for path in files
+            )
+        result[key] = {"status": "ok" if has_key else "none", "label": label}
+    site_domains = _cookie_file_domains(config.COOKIES_FILE)
+    result["site"] = {"status": "ok" if site_domains else "none",
+                      "label": "通用站点", "domains": site_domains[:8]}
+    return result
 
 
 def _safe_media_file(path):
@@ -202,6 +258,8 @@ def _safe_agent_dir(rel):
     if not parts or len(parts) > 8:
         return None
     for part in parts:
+        if len(part) > 80:
+            return None
         upper = part.upper()
         if upper in ("CON", "PRN", "AUX", "NUL"):
             return None
@@ -264,6 +322,8 @@ def asset_search(keyword=None, ext=None, category=None, min_size_mb=0, limit=20)
         cap = 20
     matched = []
     for it in items:
+        if not str(it.get("path", "")).lower().endswith((".mp4", ".mkv", ".avi", ".mov", ".flv", ".webm")):
+            continue
         if kw and kw not in it.get("name", "").lower() and kw not in it.get("rel", "").lower():
             continue
         if ex and not it.get("name", "").lower().endswith(ex if ex.startswith(".") else "." + ex):
@@ -935,14 +995,21 @@ def douyin_random(count, out_dir=None, keywords=None, min_sec=5, max_sec=360):
 
 
 def douyin_login():
-    """打开抖音窗口等待扫码登录，返回登录状态。"""
+    """打开抖音窗口等待扫码登录，成功后保存 Cookie 文件。"""
     from playwright.sync_api import sync_playwright
     with sync_playwright() as pw:
         ctx = _launch_douyin_ctx(pw, UA)
-        logged, _ = _dy_login_check(ctx)
-        try: ctx.close()
-        except Exception: pass
-    return _ok("抖音登录成功" if logged else "登录超时", logged=logged)
+        try:
+            logged, _ = _dy_login_check(ctx)
+            total, cookies = _save_profile_cookies(ctx) if logged else (0, [])
+        finally:
+            try: ctx.close()
+            except Exception: pass
+    if not logged:
+        return _fail("抖音登录超时，请重试")
+    _log(f"抖音登录成功，已保存 {len(cookies)} 个 Cookie")
+    return _ok(f"抖音登录成功，已记住登录（{len(cookies)} 个 Cookie）",
+               logged=True, total=total)
 
 
 def xhs_login():
@@ -980,12 +1047,8 @@ def xhs_login():
                     break
             if not logged:
                 return _fail("小红书登录超时，请重试")
-            # 导出 cookies：同时存小红书专用文件 + 合并进统一库
-            cookies = ctx.cookies()
-            lines = _cookies_to_lines(cookies)
-            with open(config.XHS_COOKIE_FILE, "w", encoding="utf-8") as f:
-                f.write("# Netscape HTTP Cookie File\n" + "\n".join(lines) + "\n")
-            total = _merge_cookies_file(lines)
+            # 导出 cookies：专用文件 + 统一库，下次下载直接复用
+            total, cookies = _save_profile_cookies(ctx)
             _log(f"小红书登录成功，已保存 {len(cookies)} 个 Cookie")
             return _ok(f"小红书登录成功，已记住登录（{len(cookies)} 个 Cookie）", total=total)
         except Exception as e:
@@ -1015,12 +1078,12 @@ def _cookies_to_lines(cookies):
     return lines
 
 
-def _merge_cookies_file(new_lines):
-    """把新 cookie 合并进统一 cookies.txt（按 domain+name 覆盖），不覆盖其它站点。"""
+def _merge_cookie_lines(path, new_lines):
+    """把 cookie 合并进指定 Netscape 文件（按 domain+name 覆盖）。"""
     merged = {}
-    if os.path.isfile(config.COOKIES_FILE):
+    if os.path.isfile(path):
         try:
-            with open(config.COOKIES_FILE, encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 for line in f:
                     line = line.rstrip("\n")
                     if not line or line.startswith("#"):
@@ -1031,15 +1094,38 @@ def _merge_cookies_file(new_lines):
         except Exception:
             pass
     for line in new_lines:
-        if not line:
-            continue
-        parts = line.split("\t")
+        parts = line.split("\t") if line else []
         if len(parts) >= 7:
             merged[(parts[0], parts[5])] = line  # 新值覆盖旧值
-    with open(config.COOKIES_FILE, "w", encoding="utf-8") as f:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
         f.write("# Netscape HTTP Cookie File\n")
         f.write("\n".join(merged.values()) + "\n")
     return len(merged)
+
+
+def _merge_cookies_file(new_lines):
+    """把新 cookie 合并进统一 cookies.txt（按 domain+name 覆盖），不覆盖其它站点。"""
+    return _merge_cookie_lines(config.COOKIES_FILE, new_lines)
+
+
+def _save_profile_cookies(ctx):
+    """把浏览器 Profile 的登录 Cookie 导出成文件，供下次下载直接复用。"""
+    cookies = ctx.cookies()
+    lines = _cookies_to_lines(cookies)
+    if not lines:
+        return 0, []
+    total = _merge_cookies_file(lines)
+    for path, domains in (
+        (config.COOKIE_BILI, ("bilibili.com",)),
+        (config.COOKIE_DOUYIN, ("douyin.com",)),
+        (config.XHS_COOKIE_FILE, ("xiaohongshu.com", "xhslink.com")),
+    ):
+        site_lines = [line for line in lines
+                      if any(d in line.split("\t")[0].lstrip(".").lower() for d in domains)]
+        if site_lines:
+            _merge_cookie_lines(path, site_lines)
+    return total, cookies
 
 
 def site_login(url, timeout=300):
@@ -1103,8 +1189,7 @@ def site_login(url, timeout=300):
                     else:
                         stable = 0
                     last_count = len(cookies)
-                cookies = ctx.cookies()
-                total = _merge_cookies_file(_cookies_to_lines(cookies))
+                total, cookies = _save_profile_cookies(ctx)
                 _log(f"登录成功：已保存 {len(cookies)} 个 Cookie，统一库共 {total} 个")
                 return _ok(f"登录成功，已记住该站点（本次 {len(cookies)} 个 Cookie）",
                            count=len(cookies), total=total)
@@ -1239,20 +1324,26 @@ def _verify_merge(path):
         return False, f"校验异常({str(e)[:60]})"
 
 
-def url_download(url, quality="best"):
+def url_download(url, quality="best", out_dir=None):
     """按任意视频网页链接下载（YouTube/B站/抖音等 yt-dlp 支持的站点）。
 
     - 视频与音频自动合并为 mp4；代理由 yt-dlp 自动读取系统/环境变量。
-    - 输出到 ROOT/网络视频/，文件名用视频标题。
+    - 默认输出到 ROOT/网络视频/；out_dir 只允许资产根目录下的安全相对路径。
     """
     if not isinstance(url, str) or not url.strip():
         return _fail("请提供视频链接")
     url = url.strip()
     if not re.match(r"^https?://", url, re.I):
         return _fail("链接格式不对，应以 http:// 或 https:// 开头")
+    if out_dir:
+        safe_dir = _safe_agent_dir(out_dir)
+        if not safe_dir:
+            return _fail("保存目录无效：请使用资产根目录下的相对路径，不能包含 '..' 或盘符")
+    else:
+        safe_dir = os.path.join(os.path.realpath(config.ROOT), "网络视频")
     if not try_start(f"链接下载 {url[:40]}"):
         return _fail("已有任务在运行，请等待完成")
-    out_dir = os.path.join(config.ROOT, "网络视频")
+    out_dir = safe_dir
     os.makedirs(out_dir, exist_ok=True)
     try:
         import yt_dlp

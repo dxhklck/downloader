@@ -24,6 +24,38 @@ def test_merge_cookies_overwrites_same_domain_name(tmp_path, monkeypatch):
     assert total == 2
 
 
+class _FakeYdl:
+    def __init__(self, opts):
+        self.opts = opts
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def extract_info(self, url, download=True):
+        return {"title": "测试视频", "duration": 1}
+
+
+def test_url_download_uses_custom_safe_directory(tmp_path, monkeypatch):
+    import sys
+    import types
+    monkeypatch.setattr(tools.config, "ROOT", str(tmp_path))
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=_FakeYdl))
+    tools.finish()
+    result = tools.url_download("https://example.com/video", out_dir="B站comfyui")
+    assert result["success"] is True
+    assert result["data"]["out_dir"] == str(tmp_path / "B站comfyui")
+    assert (tmp_path / "B站comfyui").is_dir()
+
+
+def test_url_download_rejects_unsafe_directory(tmp_path, monkeypatch):
+    tools.finish()
+    result = tools.url_download("https://example.com/video", out_dir="../outside")
+    assert result["success"] is False
+
+
 def test_site_login_rejects_bad_url():
     result = tools.site_login("ftp://example.com")
     assert result["success"] is False
@@ -49,11 +81,33 @@ def test_create_folder_rejects_escape(tmp_path, monkeypatch):
     assert not (tmp_path.parent / "outside").exists()
 
 
+def test_create_folder_rejects_too_long_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(tools.config, "ROOT", str(tmp_path))
+    assert tools.create_folder("a" * 81)["success"] is False
+
+
 def test_create_folder_allows_safe_relative_path(tmp_path, monkeypatch):
     monkeypatch.setattr(tools.config, "ROOT", str(tmp_path))
     result = tools.create_folder("动漫/2026/TEST")
     assert result["success"] is True
     assert (tmp_path / "动漫" / "2026" / "TEST").is_dir()
+
+
+def test_asset_search_never_exposes_cookie_files(tmp_path, monkeypatch):
+    import assets
+    root = tmp_path / "videos"
+    root.mkdir()
+    items = [
+        {"name": "clip.mp4", "path": str(root / "clip.mp4"), "rel": "videos/clip.mp4",
+         "cat": "videos", "size": 1, "mtime": 0},
+        {"name": "cookies.txt", "path": str(tmp_path / "cookies.txt"),
+         "rel": "cookies.txt", "cat": "root", "size": 1, "mtime": 0},
+    ]
+    monkeypatch.setattr(assets, "scan", lambda **kw: {"success": True, "message": "ok",
+        "data": {"items": items, "stats": {}, "scanned_at": 0}})
+    result = tools.asset_search()
+    assert result["success"] is True
+    assert [it["name"] for it in result["data"]["items"]] == ["clip.mp4"]
 
 
 def test_asset_search_caps_results(tmp_path, monkeypatch):

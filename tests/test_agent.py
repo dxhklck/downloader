@@ -1,6 +1,7 @@
 """Agent 工具派发与参数白名单测试。"""
 import json
 import os
+import threading
 from types import SimpleNamespace
 
 import agent
@@ -78,22 +79,69 @@ def _make_agent(monkeypatch, responses):
     return a, events
 
 
-def test_schema_excluded_argument_is_filtered(monkeypatch):
-    """LLM 传入 Schema 未声明的 out_dir 必须被过滤，即使函数签名里有该参数。"""
+def test_schema_declared_out_dir_is_passed(monkeypatch):
+    """out_dir 已在 Schema 声明，应作为安全相对路径传给下载工具。"""
     captured = {}
 
-    def fake_download(url, out_dir=None):
-        captured.update(url=url, out_dir=out_dir)
+    def fake_download(url, out_dir=None, quality="best"):
+        captured.update(url=url, out_dir=out_dir, quality=quality)
         return {"success": True}
 
     monkeypatch.setitem(agent.FUNCS, "url_download", fake_download)
     a, events = _make_agent(monkeypatch, [
-        _completion([_tool_call("url_download", '{"url": "http://v", "out_dir": "/etc"}')]),
+        _completion([_tool_call("url_download", '{"url": "http://v", "out_dir": "B站comfyui"}')]),
         _completion(),
     ])
     a.chat("下载")
     assert captured["url"] == "http://v"
-    assert captured["out_dir"] is None, "Schema 外的 out_dir 被传入了工具函数"
+    assert captured["out_dir"] == "B站comfyui"
+
+
+def test_unknown_schema_argument_is_still_filtered(monkeypatch):
+    """Schema 未声明的参数仍必须被过滤。"""
+    captured = {}
+
+    def fake_download(url, quality="best", out_dir=None, secret=None):
+        captured.update(url=url, secret=secret)
+        return {"success": True}
+
+    monkeypatch.setitem(agent.FUNCS, "url_download", fake_download)
+    a, events = _make_agent(monkeypatch, [
+        _completion([_tool_call("url_download", '{"url": "http://v", "secret": "x"}')]),
+        _completion(),
+    ])
+    a.chat("下载")
+    assert captured["url"] == "http://v"
+    assert captured["secret"] is None
+
+
+def test_bili_link_allows_url_download(monkeypatch):
+    """带视频链接时，B站不能硬拦截 url_download。"""
+    called = []
+    monkeypatch.setitem(agent.FUNCS, "url_download",
+                        lambda url, quality="best", out_dir=None: called.append(
+                            {"url": url, "quality": quality, "out_dir": out_dir}) or {"success": True})
+    a, events = _make_agent(monkeypatch, [
+        _completion([_tool_call("url_download", '{"url": "https://www.bilibili.com/video/BV1"}')]),
+        _completion(),
+    ])
+    a.chat("下载链接 https://www.bilibili.com/video/BV1 中的视频")
+    results = [data for event, data in events if event == "result"]
+    assert results[0]["success"] is True
+    assert called[0]["url"] == "https://www.bilibili.com/video/BV1"
+
+
+def test_bili_no_link_still_blocks_douyin_tool(monkeypatch):
+    """无链接的 B站随机请求仍不能走抖音工具。"""
+    called = []
+    monkeypatch.setitem(agent.FUNCS, "douyin_random",
+                        lambda **kw: called.append(kw) or {"success": True})
+    a, events = _make_agent(monkeypatch, [
+        _completion([_tool_call("douyin_random", '{"count": 1}')]),
+        _completion(),
+    ])
+    a.chat("B站随机下一首")
+    assert called == []
 
 
 def test_unknown_tool_is_reported(monkeypatch):
@@ -145,6 +193,40 @@ def test_large_tool_result_is_saved_with_preview(tmp_path, monkeypatch):
     payload = json.loads(text)
     assert payload["data"]["truncated"] is True
     assert os.path.isfile(payload["data"]["file"])
+
+
+def test_ask_choice_rejects_duplicate_answer(monkeypatch):
+    a, _ = _make_agent(monkeypatch, [])
+    entry = {"event": threading.Event(), "options": ["A", "B"], "answer": None}
+    with a._choice_lock:
+        a._choices["c1"] = entry
+    first = a.answer_choice("c1", "A")
+    second = a.answer_choice("c1", "B")
+    assert first["ok"] is True
+    assert second["ok"] is False
+    assert entry["answer"] == "A"
+
+
+def test_ask_choice_rejects_sensitive_question(monkeypatch):
+    a, events = _make_agent(monkeypatch, [])
+    result = a._ask_choice({"question": "请输入 API Key", "options": ["现已配置", "稍后再说"]})
+    assert result["success"] is False
+    assert result["error_code"] == "sensitive_choice"
+    assert result["retryable"] is False
+    assert not any(event == "ask_choice" for event, _ in events)
+
+
+def test_tool_events_share_stable_fields(monkeypatch):
+    a, events = _make_agent(monkeypatch, [
+        _completion([_tool_call("get_state", "{}")]),
+        _completion(),
+    ])
+    a.chat("进度")
+    tool = next(data for event, data in events if event == "tool")
+    done = next(data for event, data in events if event == "tool_done")
+    for payload in (tool, done):
+        assert {"name", "args", "status", "tool_call_id", "elapsed_ms"} <= set(payload)
+    assert tool["tool_call_id"] == done["tool_call_id"]
 
 
 def test_api_error_is_retried_once(monkeypatch):

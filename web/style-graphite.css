@@ -394,6 +394,7 @@ button { -webkit-appearance: none; appearance: none; }
 .tool-card-name { color: var(--text-accent); font-family: var(--font-mono); font-weight: var(--fw-semibold); word-break: break-all; }
 .tool-card-state { margin-left: auto; flex: none; padding: 1px 6px; border-radius: 999px; font-size: var(--fs-11); }
 .tool-card-state.pending { background: var(--bg-hover, #eef0f4); color: var(--text-muted); }
+.tool-card-state.waiting { background: var(--warning-soft, #fff4d6); color: var(--warning, #a15c00); }
 .tool-card-state.ok { background: var(--success-soft); color: var(--success); }
 .tool-card-state.fail { background: var(--danger-soft); color: var(--danger); }
 .tool-card-args { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border-subtle); }
@@ -725,6 +726,8 @@ button { -webkit-appearance: none; appearance: none; }
 .update-result.fail { color: var(--danger); }
 .update-result .btn { margin-top: 8px; }
 .test-result { font-size: var(--fs-12); min-height: 16px; line-height: var(--lh-normal); }
+.site-login-result { display: none; margin-bottom: 12px; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--bg-input); }
+.site-login-result:not(:empty) { display: block; }
 .test-result.ok { color: var(--success); }
 .test-result.ok::before { content: "✓ "; }
 .test-result.fail { color: var(--danger); }

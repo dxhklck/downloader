@@ -101,7 +101,8 @@ class Api:
         tool_call_id = "retry_%s_%s" % (job_id, name)
         started = time.monotonic()
         self._emit("tool", {"name": name, "args": args, "job_id": job_id,
-                            "tool_call_id": tool_call_id, "status": "running"})
+                            "tool_call_id": tool_call_id, "status": "running",
+                            "elapsed_ms": 0})
         fn = FUNCS.get(name)
         if not callable(fn):
             result = {"success": False, "message": f"未知工具：{name}"}
@@ -117,8 +118,11 @@ class Api:
             except Exception as e:
                 result = self._err(e)
         elapsed = int((time.monotonic() - started) * 1000)
-        self._emit("tool_done", {"name": name, "status": "ok" if result.get("success") else "error",
-                                 "tool_call_id": tool_call_id, "elapsed_ms": elapsed})
+        self._emit("tool_done", {"name": name, "args": args,
+                                 "status": "ok" if result.get("success") else "error",
+                                 "tool_call_id": tool_call_id, "elapsed_ms": elapsed,
+                                 "error_code": result.get("error_code"),
+                                 "retryable": result.get("retryable", not result.get("success"))})
         self._emit("result", result)
         if ("download" in name or "random" in name) and (result.get("success") or result.get("cancelled")):
             enabled = config.load().get("notify_on_complete", False)
