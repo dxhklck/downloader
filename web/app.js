@@ -68,10 +68,8 @@ function renderRecord(rec, log) {
   if (!rec || !log) return;
   const t = rec.type;
   if (t === 'html') {
-    const wrap = document.createElement('div');
-    wrap.innerHTML = String(rec.html || '');
-    const card = wrap.firstElementChild;
-    if (card) log.appendChild(card);
+    const text = String(rec.html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    if (text) addMessage(text.slice(0, 1000), 'agent');
   } else if (t === 'user') addMessage(rec.text || '', 'user');
   else if (t === 'msg' || t === 'status') addMessage(rec.text || '', 'agent');
   else if (t === 'tool_start') addToolStatus(rec.name || '', rec.args || {}, rec.tool_call_id);
