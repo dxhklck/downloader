@@ -37,6 +37,7 @@ HIDDEN_IMPORTS = [
     "webview.platforms.winforms",
     "openai",
     "httpx",
+    "PIL",
     "playwright",
     "playwright.sync_api",
     "yt_dlp", "yt_dlp.extractor.youtube",

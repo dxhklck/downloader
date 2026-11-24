@@ -111,23 +111,35 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
 
-      # ---- 构建产物最小 smoke：确保关键模块都被打进包 ----
+      # ---- 构建产物最小 smoke：确保产物存在且版本信息已写入 ----
       - name: Build artifact smoke
         shell: bash
         run: |
           python - <<'PY'
+          import json
+          import platform as host_platform
           from pathlib import Path
           import build
-          app = Path('dist') / ('视频下载助手.exe' if build.APP_NAME == '视频下载助手' else build.APP_NAME)
-          if not app.exists():
-              candidates = list(Path('dist').glob('*.exe'))
-              assert candidates, 'dist 下没有 exe 产物'
-              app = candidates[0]
+          root = Path('dist') / build.APP_NAME
+          bundle = Path('dist') / (build.APP_NAME + '.app') if host_platform.system() == 'Darwin' else root
+          assert bundle.is_dir(), f'未找到构建产物目录: {bundle}'
+          if host_platform.system() == 'Windows':
+              app = root / (build.APP_NAME + '.exe')
+          elif host_platform.system() == 'Darwin':
+              app = bundle / 'Contents' / 'MacOS' / build.APP_NAME
+          else:
+              app = root / build.APP_NAME
+          assert app.is_file(), f'未找到可执行文件: {app}'
           print('artifact:', app, app.stat().st_size)
-          assert app.stat().st_size > 1024 * 1024, 'exe 产物异常过小'
+          assert app.stat().st_size > 1024 * 1024, '可执行文件异常过小'
+          info = json.loads(Path('assets/build_info.json').read_text(encoding='utf-8'))
+          assert info.get('version') == build.APP_VERSION, (info, build.APP_VERSION)
+          if host_platform.system() == 'Windows':
+              ver = Path('assets/version_info.txt').read_text(encoding='utf-8')
+              assert build.APP_VERSION in ver, 'Windows 版本信息未写入'
           source = Path('build.py').read_text(encoding='utf-8')
           for module in ('pywebview', 'openai', 'yt_dlp', 'playwright', 'PIL'):
-              assert module in source, f'build.py 缺少 hidden-import: {module}'
+              assert f'"{module}"' in source, f'build.py 缺少 hidden-import: {module}'
           PY
 
       # ---- 平台安装包 ----
