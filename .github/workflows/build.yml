@@ -114,6 +114,8 @@ jobs:
       # ---- 构建产物最小 smoke：确保产物存在且版本信息已写入 ----
       - name: Build artifact smoke
         shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
         run: |
           python - <<'PY'
           import json
@@ -130,7 +132,7 @@ jobs:
           else:
               app = root / build.APP_NAME
           assert app.is_file(), f'未找到可执行文件: {app}'
-          print('artifact:', app, app.stat().st_size)
+          print('artifact:', str(app).encode('unicode_escape').decode(), app.stat().st_size)
           assert app.stat().st_size > 1024 * 1024, '可执行文件异常过小'
           info = json.loads(Path('assets/build_info.json').read_text(encoding='utf-8'))
           assert info.get('version') == build.APP_VERSION, (info, build.APP_VERSION)
@@ -138,8 +140,8 @@ jobs:
               ver = Path('assets/version_info.txt').read_text(encoding='utf-8')
               assert build.APP_VERSION in ver, 'Windows 版本信息未写入'
           source = Path('build.py').read_text(encoding='utf-8')
-          for module in ('pywebview', 'openai', 'yt_dlp', 'playwright', 'PIL'):
-              assert f'"{module}"' in source, f'build.py 缺少 hidden-import: {module}'
+          for module in ('webview.platforms', 'openai', 'yt_dlp', 'playwright', 'PIL'):
+              assert module in source, f'build.py 缺少 hidden-import: {module}'
           PY
 
       # ---- 平台安装包 ----
