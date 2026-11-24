@@ -428,8 +428,10 @@ function markToolStatus(result) {
   let card = null;
   if (result && result.tool_call_id) {
     card = Array.from(cards).find((n) => n.dataset.toolCallId === result.tool_call_id && !n.dataset.toolDone);
+    if (!card) return;  // 已有终态时不兜底匹配别的工具卡
+  } else {
+    card = Array.from(cards).reverse().find((n) => !n.dataset.toolDone);
   }
-  if (!card) card = Array.from(cards).reverse().find((n) => !n.dataset.toolDone);
   if (!card) return;
   let args = {};
   try { args = JSON.parse(card.dataset.toolArgs || '{}'); } catch (e) {}

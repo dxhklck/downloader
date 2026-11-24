@@ -111,6 +111,25 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
 
+      # ---- 构建产物最小 smoke：确保关键模块都被打进包 ----
+      - name: Build artifact smoke
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import build
+          app = Path('dist') / ('视频下载助手.exe' if build.APP_NAME == '视频下载助手' else build.APP_NAME)
+          if not app.exists():
+              candidates = list(Path('dist').glob('*.exe'))
+              assert candidates, 'dist 下没有 exe 产物'
+              app = candidates[0]
+          print('artifact:', app, app.stat().st_size)
+          assert app.stat().st_size > 1024 * 1024, 'exe 产物异常过小'
+          source = Path('build.py').read_text(encoding='utf-8')
+          for module in ('pywebview', 'openai', 'yt_dlp', 'playwright', 'PIL'):
+              assert module in source, f'build.py 缺少 hidden-import: {module}'
+          PY
+
       # ---- 平台安装包 ----
       - name: Make installer (Windows / Inno Setup)
         if: matrix.platform == 'windows'
