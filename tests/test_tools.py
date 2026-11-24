@@ -35,7 +35,14 @@ class _FakeYdl:
         return False
 
     def extract_info(self, url, download=True):
-        return {"title": "测试视频", "duration": 1}
+        # 模拟 yt-dlp 实际写出文件，供下载后校验。
+        import os
+        folder = self.opts.get("outtmpl", "").rsplit(os.sep, 1)[0]
+        if folder:
+            os.makedirs(folder, exist_ok=True)
+            with open(os.path.join(folder, "video.mp4"), "wb") as f:
+                f.write(b"x" * 100001)
+        return {"title": "测试视频", "duration": 1, "_filename": "video.mp4"}
 
 
 def test_url_download_uses_custom_safe_directory(tmp_path, monkeypatch):
@@ -48,6 +55,8 @@ def test_url_download_uses_custom_safe_directory(tmp_path, monkeypatch):
     assert result["success"] is True
     assert result["data"]["out_dir"] == str(tmp_path / "B站comfyui")
     assert (tmp_path / "B站comfyui").is_dir()
+
+    # 模拟 yt-dlp 报告实际输出文件（文件大小/校验依赖真实文件）。
 
 
 def test_url_download_rejects_unsafe_directory(tmp_path, monkeypatch):
@@ -171,7 +180,7 @@ def test_ensure_cookie_file_repairs_legacy_format(tmp_path):
     tools._ensure_cookie_file(str(path))
     text = path.read_text(encoding="utf-8")
     assert text.startswith("# Netscape HTTP Cookie File\n")
-    assert "www.douyin.com\tFALSE\t/\tFALSE\t0\tsid\t1" in text
+    assert ".www.douyin.com\tTRUE\t/\tFALSE\t0\tsid\t1" in text
 
 
 def test_write_cookie_file_adds_netscape_header(tmp_path):

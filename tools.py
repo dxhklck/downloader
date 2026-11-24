@@ -26,6 +26,9 @@ LOGIN_LOCK = threading.Lock()
 # 后果是全进程所有删除静默失效。改为"受控挂起"：锁保护 + 必定恢复，
 # 且只覆盖被复用的下载脚本调用期间，其它时刻 os.remove 保持正常。
 _REMOVE_GUARD = threading.RLock()
+_COOKIE_LOCK = threading.RLock()
+_PROXY_LOCK = threading.RLock()
+PROXY_ENV_KEYS = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY")
 
 
 def _suspend_remove():
@@ -148,7 +151,7 @@ def _cookie_file_domains(path):
         return []
     found = set()
     try:
-        with open(path, encoding="utf-8", errors="replace") as f:
+        with _COOKIE_LOCK, open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 if line.startswith("#") or not line.strip():
                     continue
@@ -1102,15 +1105,16 @@ def _cookies_to_lines(cookies):
 
 
 def _ensure_cookie_file(path):
-    """修复旧 Cookie 文件的 Netscape 头与域名格式，避免 yt-dlp 拒绝加载。"""
+    """仅修复明显错误的旧 Cookie 文件：补 Netscape 头、纠正域名/flag 不一致。"""
     if not path or not os.path.isfile(path):
         return path
     try:
-        with open(path, encoding="utf-8") as f:
+        with _COOKIE_LOCK, open(path, encoding="utf-8") as f:
             lines = f.read().splitlines()
         rows = []
-        changed = not any(x.startswith("# Netscape") or x.startswith("# HTTP Cookie")
-                          for x in lines[:3])
+        has_header = any(x.startswith("# Netscape") or x.startswith("# HTTP Cookie")
+                         for x in lines[:3])
+        changed = not has_header
         for line in lines:
             if not line or line.startswith("#"):
                 continue
@@ -1118,14 +1122,16 @@ def _ensure_cookie_file(path):
             if len(parts) < 7:
                 changed = True
                 continue
-            raw_domain = parts[0].strip()
-            domain = raw_domain.lstrip(".")
+            domain = parts[0].strip()
+            flag = (parts[1] or "").strip().upper()
             if not domain or not parts[5].strip():
                 changed = True
                 continue
-            specified = raw_domain.startswith(".")
-            normalized = [("." if specified else "") + domain,
-                          "TRUE" if specified else "FALSE",
+            # 保留原 flag 的语义；仅修正前导点与 flag 不一致的明显错误。
+            # Netscape：domain_specified=TRUE 对应域 Cookie（前导点），FALSE 对应主机 Cookie。
+            specified = flag == "TRUE" if flag in ("TRUE", "FALSE") else domain.startswith(".")
+            expected = ("." if specified else "") + domain.lstrip(".")
+            normalized = [expected, flag if flag in ("TRUE", "FALSE") else ("TRUE" if specified else "FALSE"),
                           parts[2] or "/", parts[3] or "FALSE", parts[4] or "0",
                           parts[5].strip(), parts[6]]
             row = "\t".join(normalized)
@@ -1133,10 +1139,11 @@ def _ensure_cookie_file(path):
                 changed = True
             rows.append(row)
         if changed:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write("# Netscape HTTP Cookie File\n")
-                if rows:
-                    f.write("\n".join(rows) + "\n")
+            with _COOKIE_LOCK:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("# Netscape HTTP Cookie File\n")
+                    if rows:
+                        f.write("\n".join(rows) + "\n")
         return path
     except OSError:
         return path
@@ -1144,28 +1151,31 @@ def _ensure_cookie_file(path):
 
 def _merge_cookie_lines(path, new_lines):
     """把 cookie 合并进指定 Netscape 文件（按 domain+name 覆盖）。"""
-    merged = {}
-    if os.path.isfile(path):
-        try:
-            with open(path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.rstrip("\n")
-                    if not line or line.startswith("#"):
-                        continue
-                    parts = line.split("\t")
-                    if len(parts) >= 7:
-                        merged[(parts[0], parts[5])] = line
-        except Exception:
-            pass
-    for line in new_lines:
-        parts = line.split("\t") if line else []
-        if len(parts) >= 7:
-            merged[(parts[0], parts[5])] = line  # 新值覆盖旧值
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("# Netscape HTTP Cookie File\n")
-        f.write("\n".join(merged.values()) + "\n")
-    return len(merged)
+    with _COOKIE_LOCK:
+        merged = {}
+        if os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.rstrip("\n")
+                        if not line or line.startswith("#"):
+                            continue
+                        parts = line.split("\t")
+                        if len(parts) >= 7:
+                            merged[(parts[0], parts[5])] = line
+            except OSError:
+                pass
+        for line in new_lines:
+            parts = line.split("\t") if line else []
+            if len(parts) >= 7:
+                merged[(parts[0], parts[5])] = line
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("# Netscape HTTP Cookie File\n")
+            f.write("\n".join(merged.values()) + "\n")
+        os.replace(tmp, path)
+        return len(merged)
 
 
 def _merge_cookies_file(new_lines):
@@ -1459,42 +1469,42 @@ def search_videos(keyword, platform="all", count=8, out_dir=None, quality="best"
         },
     }
     px = config.proxy_url() or config.system_proxy_url()
-    proxy_keys = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY")
-    saved_proxy = {}
-    try:
-        if px:
-            opts["proxy"] = px
-        # B站直连即可；环境里注入的代理会让 API 返回 412。
-        if not px and prefix == "bilisearch":
-            for name in proxy_keys:
-                if name in os.environ:
-                    saved_proxy[name] = os.environ.pop(name)
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info("%s%d:%s" % (prefix, cap, keyword), download=False)
-        items = []
-        for e in ((info or {}).get("entries") or [])[:cap]:
-            if not isinstance(e, dict):
-                continue
-            url = e.get("webpage_url") or e.get("url") or ""
-            if not isinstance(url, str) or not url.startswith("http"):
-                continue
-            items.append({
-                "title": str(e.get("title") or "无标题")[:160],
-                "url": url,
-                "id": str(e.get("id") or "")[:80],
-                "duration": int(e.get("duration") or 0),
-                "uploader": str(e.get("uploader") or "")[:80],
-            })
-        if not items:
-            return _fail("没有找到匹配的视频，试试更短的关键词", error_code="no_results")
-        return _ok("找到 %d 个候选视频，请在界面选择" % len(items),
-                   items=items, keyword=keyword, platform=key,
-                   out_dir=out_dir or "", quality=quality or "best")
-    except Exception as e:
-        return _fail("搜索失败：" + str(e)[:150], error_code="search_failed")
-    finally:
-        for name, value in saved_proxy.items():
-            os.environ[name] = value
+    with _PROXY_LOCK:
+        saved_proxy = {}
+        try:
+            if px:
+                opts["proxy"] = px
+            # B站直连即可；环境里注入的代理会让 API 返回 412。
+            if not px and prefix == "bilisearch":
+                for name in PROXY_ENV_KEYS:
+                    if name in os.environ:
+                        saved_proxy[name] = os.environ.pop(name)
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info("%s%d:%s" % (prefix, cap, keyword), download=False)
+            items = []
+            for e in ((info or {}).get("entries") or [])[:cap]:
+                if not isinstance(e, dict):
+                    continue
+                url = e.get("webpage_url") or e.get("url") or ""
+                if not isinstance(url, str) or not url.startswith("http"):
+                    continue
+                items.append({
+                    "title": str(e.get("title") or "无标题")[:160],
+                    "url": url,
+                    "id": str(e.get("id") or "")[:80],
+                    "duration": int(e.get("duration") or 0),
+                    "uploader": str(e.get("uploader") or "")[:80],
+                })
+            if not items:
+                return _fail("没有找到匹配的视频，试试更短的关键词", error_code="no_results")
+            return _ok("找到 %d 个候选视频，请在界面选择" % len(items),
+                       items=items, keyword=keyword, platform=key,
+                       out_dir=out_dir or "", quality=quality or "best")
+        except Exception as e:
+            return _fail("搜索失败：" + str(e)[:150], error_code="search_failed")
+        finally:
+            for name, value in saved_proxy.items():
+                os.environ[name] = value
 
 
 def url_download(url, quality="best", out_dir=None):
@@ -1580,46 +1590,57 @@ def url_download(url, quality="best", out_dir=None):
     # 常返回 502，会挡住 YouTube）。用临时环境，结束后恢复，不影响同进程其它下载。
     px = config.proxy_url() or config.system_proxy_url()
     saved = {}
-    try:
-        if px:
-            # 显式指定代理，同时清掉环境变量里可能注入的坏代理，避免冲突
-            opts["proxy"] = px
-            for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"):
-                if k in os.environ:
-                    saved[k] = os.environ.pop(k)
-            _log(f"使用代理：{px}")
-        else:
-            # 无代理：清掉环境注入的坏代理，直连国内站点
-            for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"):
-                if k in os.environ:
-                    saved[k] = os.environ.pop(k)
-        files_before = set(os.listdir(out_dir))
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-        title = (info or {}).get("title", "")
-        dur = (info or {}).get("duration") or 0
-        # 定位本次下载文件并校验音画合并
-        merge_note = ""
-        new_files = [f for f in set(os.listdir(out_dir)) - files_before
-                     if f.lower().endswith((".mp4", ".mkv", ".webm", ".flv"))]
-        if new_files:
-            newest = max(new_files, key=lambda f: os.path.getmtime(os.path.join(out_dir, f)))
-            verify_ok, note = _verify_merge(os.path.join(out_dir, newest))
+    with _PROXY_LOCK:
+        try:
+            if px:
+                opts["proxy"] = px
+                for k in PROXY_ENV_KEYS:
+                    if k in os.environ:
+                        saved[k] = os.environ.pop(k)
+                _log(f"使用代理：{px}")
+            else:
+                for k in PROXY_ENV_KEYS:
+                    if k in os.environ:
+                        saved[k] = os.environ.pop(k)
+            before = {name: os.path.getmtime(os.path.join(out_dir, name))
+                      for name in os.listdir(out_dir)
+                      if name.lower().endswith((".mp4", ".mkv", ".webm", ".flv"))}
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+            title = (info or {}).get("title", "")
+            dur = (info or {}).get("duration") or 0
+            files = [name for name in os.listdir(out_dir)
+                     if name.lower().endswith((".mp4", ".mkv", ".webm", ".flv"))]
+            candidates = [name for name in files
+                          if name not in before or os.path.getmtime(os.path.join(out_dir, name)) > before[name]]
+            if not candidates and (info or {}).get("_filename"):
+                actual = os.path.basename(str(info["_filename"]))
+                if actual in files:
+                    candidates = [actual]
+            if not candidates:
+                return _fail("下载完成但未找到视频文件，请检查下载目录", error_code="download_missing")
+            newest = max(candidates, key=lambda f: os.path.getmtime(os.path.join(out_dir, f)))
+            output_path = os.path.join(out_dir, newest)
+            if os.path.getsize(output_path) < 100000:
+                return _fail("下载文件异常（过小或合并失败）", error_code="merge_verify_failed")
+            verify_ok, note = _verify_merge(output_path)
             merge_note = f" [合并校验：{note}]"
             _log(f"合并校验：{note}")
-        _log(f"链接下载完成：{title[:40]}")
-        return _ok(f"已下载：{title[:40]}（{int(dur)}秒）→ {out_dir}{merge_note}",
-                   title=title, duration=dur, out_dir=out_dir)
-    except Exception as e:
-        if _cancelled():
-            return _ok("下载已取消", cancelled=True)
-        return _fail(f"链接下载失败：{str(e)[:150]}")
-    finally:
-        for k, v in saved.items():  # 恢复被临时清掉的环境代理
-            os.environ[k] = v
-        if cookie_path and temp_cookie:  # 只删手动粘贴生成的临时文件，登录保存的保留
-            try:
-                os.remove(cookie_path)
-            except Exception:
-                pass
-        finish()
+            if not verify_ok and not note.startswith("校验异常"):
+                return _fail(f"下载完成但合并校验未通过：{note}", error_code="merge_verify_failed")
+            _log(f"链接下载完成：{title[:40]}")
+            return _ok(f"已下载：{title[:40]}（{int(dur)}秒）→ {out_dir}{merge_note}",
+                       title=title, duration=dur, out_dir=out_dir)
+        except Exception as e:
+            if _cancelled():
+                return _ok("下载已取消", cancelled=True)
+            return _fail(f"链接下载失败：{str(e)[:150]}")
+        finally:
+            for k, v in saved.items():
+                os.environ[k] = v
+            if cookie_path and temp_cookie:
+                try:
+                    os.remove(cookie_path)
+                except Exception:
+                    pass
+            finish()

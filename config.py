@@ -195,14 +195,23 @@ def system_proxy_url():
         if not enabled or not server:
             return ""
         server = server.strip()
-        # ProxyServer 可能是 "http=host:port;https=host:port" 形式，取 http
+        # ProxyServer 可能是 "http=host:port;https=host:port;socks=host:port" 形式。
         if "=" in server:
+            chosen = None
             for part in server.split(";"):
-                if "=" in part:
-                    scheme, addr = part.split("=", 1)
-                    if scheme.strip().lower() in ("http", "https"):
-                        server = addr.strip()
-                        break
+                if "=" not in part:
+                    continue
+                scheme, addr = part.split("=", 1)
+                scheme = scheme.strip().lower()
+                addr = addr.strip()
+                if scheme in ("http", "https"):
+                    chosen = ("http://" + addr if "://" not in addr else addr)
+                    break
+                if scheme in ("socks", "socks5") and chosen is None:
+                    chosen = ("socks5://" + addr if "://" not in addr else addr)
+            server = chosen or ""
+        if not server:
+            return ""
         if "://" not in server:
             server = "http://" + server
         return server

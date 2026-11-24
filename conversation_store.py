@@ -2,9 +2,13 @@
 import json
 import os
 import re
+import threading
 import time
+import uuid
 
 import config
+
+_STORE_LOCK = threading.RLock()
 
 
 def _dir():
@@ -20,7 +24,7 @@ def _path(cid):
 
 
 def new_id():
-    return "c%s" % int(time.time() * 1000)
+    return "c%s%s" % (int(time.time() * 1000), uuid.uuid4().hex[:8])
 
 
 def read(cid):
@@ -28,8 +32,9 @@ def read(cid):
     if not path or not os.path.isfile(path):
         return {}
     try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
+        with _STORE_LOCK:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError, TypeError):
         return {}
@@ -48,9 +53,10 @@ def _write(cid, data):
         return False
     tmp = path + ".tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, default=str)
-        os.replace(tmp, path)
+        with _STORE_LOCK:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, default=str)
+            os.replace(tmp, path)
         return True
     except OSError:
         try:
@@ -61,23 +67,25 @@ def _write(cid, data):
 
 
 def save(cid, messages, title="", display=None, events=None):
-    old = read(cid)
-    data = {"id": cid, "title": str(title or old.get("title") or "")[:60],
-            "updated_at": time.time(), "messages": messages or [],
-            "display": display if display is not None else old.get("display", []),
-            "events": events if events is not None else old.get("events", []),
-            "records": old.get("records", [])}
-    return _write(cid, data)
+    with _STORE_LOCK:
+        old = read(cid)
+        data = {"id": cid, "title": str(title or old.get("title") or "")[:60],
+                "updated_at": time.time(), "messages": messages or [],
+                "display": display if display is not None else old.get("display", []),
+                "events": events if events is not None else old.get("events", []),
+                "records": old.get("records", [])}
+        return _write(cid, data)
 
 
 def append_record(cid, record):
     """把一条界面记录追加到同一会话流水，和 messages 一起持久化。"""
-    data = read(cid)
-    records = data.get("records") or []
-    records.append(record)
-    data["records"] = records[-HISTORY_MAX_RECORDS:]
-    data["updated_at"] = time.time()
-    return _write(cid, data)
+    with _STORE_LOCK:
+        data = read(cid)
+        records = data.get("records") or []
+        records.append(record)
+        data["records"] = records[-HISTORY_MAX_RECORDS:]
+        data["updated_at"] = time.time()
+        return _write(cid, data)
 
 
 def _record_from_message(message):
@@ -104,24 +112,30 @@ def _record_from_message(message):
 
 
 def migrate_legacy(cid):
-    """旧会话优先迁移 display，其次从模型上下文还原可读流水。"""
-    data = read(cid)
-    if data.get("records"):
-        return data["records"]
-    records = []
-    display = data.get("display") or []
-    if isinstance(display, list):
-        records = [{"type": "html", "html": str(item)} for item in display if item]
-    if not records:
+    """旧会话优先从模型上下文还原结构化流水，display 只保留文字内容。"""
+    with _STORE_LOCK:
+        data = read(cid)
+        if data.get("records"):
+            return data["records"]
+        records = []
         for message in data.get("messages") or []:
             record = _record_from_message(message)
             if record:
                 records.append(record)
-    if not records:
-        return []
-    data["records"] = records[-HISTORY_MAX_RECORDS:]
-    _write(cid, data)
-    return data["records"]
+        if not records:
+            import re as _re
+            display = data.get("display") or []
+            if isinstance(display, list):
+                for item in display:
+                    text = _re.sub(r"<[^>]+>", " ", str(item))
+                    text = _re.sub(r"\s+", " ", text).strip()
+                    if text:
+                        records.append({"type": "msg", "text": text[:1000]})
+        if not records:
+            return []
+        data["records"] = records[-HISTORY_MAX_RECORDS:]
+        _write(cid, data)
+        return data["records"]
 
 
 def _title_from(data):

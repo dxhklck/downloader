@@ -168,8 +168,8 @@ def _safe_media_path(path):
     if not isinstance(path, str) or not path:
         return None
     try:
-        full = os.path.abspath(path)
-        root = os.path.abspath(config.ROOT)
+        full = os.path.realpath(path)
+        root = os.path.realpath(config.ROOT)
         if os.path.commonpath([full, root]) != root:
             return None
         if not os.path.isfile(full):

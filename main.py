@@ -46,7 +46,9 @@ class Api:
         self.q.put({"event": event, "data": data})
         if event == "record" and self._current_job:
             import conversation_store
-            conversation_store.append_record(self.agent.conversation_id, data)
+            cid = data.get("conversation_id") or self._current_job.get("cid") or self.agent.conversation_id
+            payload = {k: v for k, v in data.items() if k != "conversation_id"}
+            conversation_store.append_record(cid, payload)
 
     # ---- 界面轮询 ----
     def poll(self):
@@ -67,21 +69,26 @@ class Api:
             with self._job_lock:
                 self._current_job = job
                 self._sync_queue()
-            if job["kind"] == "chat":
-                self._emit("record", {"type": "user", "text": job.get("text", "")})
-            elif job["kind"] == "tool":
-                self._emit("record", {"type": "tool_start", "name": job.get("name", ""),
-                                      "args": job.get("args", {})})
-            self._emit("job_start", {"id": job["id"], "kind": job["kind"]})
             try:
-                self._chat_busy.acquire()
+                if job["kind"] == "chat":
+                    self._emit("record", {"type": "user", "text": job.get("text", ""),
+                                          "conversation_id": job.get("cid")})
+                elif job["kind"] == "tool":
+                    self._emit("record", {"type": "tool_start", "name": job.get("name", ""),
+                                          "args": job.get("args", {}), "conversation_id": job.get("cid")})
+                self._emit("job_start", {"id": job["id"], "kind": job["kind"]})
                 try:
-                    if job["kind"] == "chat":
-                        self.agent.chat(job["text"])
-                    else:
-                        self._run_tool(job["name"], job["args"])
-                finally:
-                    self._chat_busy.release()
+                    self._chat_busy.acquire()
+                    try:
+                        if job["kind"] == "chat":
+                            self.agent.chat(job["text"])
+                        else:
+                            self._run_tool(job["name"], job["args"])
+                    finally:
+                        self._chat_busy.release()
+                except Exception as e:
+                    self._emit("result", {"success": False, "message": "任务执行失败",
+                                          "detail": str(e)[:300]})
             finally:
                 with self._job_lock:
                     self._current_job = None
@@ -96,7 +103,8 @@ class Api:
         tools.set_queue_snapshot(queued, self._current_job)
 
     def _enqueue(self, kind, **data):
-        job = {"id": next(self._job_ids), "kind": kind, **data}
+        job = {"id": next(self._job_ids), "kind": kind,
+               "cid": self.agent._record_conversation_id, **data}
         with self._job_lock:
             self._jobs.put(job)
             self._sync_queue()

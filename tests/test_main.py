@@ -77,16 +77,15 @@ def test_switch_conversation_migrates_legacy_display(tmp_path, monkeypatch):
     import conversation_store
     monkeypatch.setattr(conversation_store.config, "CONVERSATIONS_DIR", str(tmp_path))
     cid = conversation_store.new_id()
-    conversation_store.save(cid, [{"role": "user", "content": "旧会话"}],
-                            display=['<div class="msg msg-user">旧消息</div>'])
+    conversation_store.save(cid, [], display=['<div class="msg msg-user">旧消息</div>'])
     data = conversation_store.read(cid)
     data.pop("records", None)
     (tmp_path / (cid + ".json")).write_text(__import__("json").dumps(data, ensure_ascii=False),
                                             encoding="utf-8")
     api = main.Api()
     switched = api.switch_conversation(cid)
-    assert switched["records"][0]["type"] == "html"
-    assert "旧消息" in switched["records"][0]["html"]
+    assert switched["records"][0]["type"] == "msg"
+    assert "旧消息" in switched["records"][0]["text"]
 
 
 def test_retry_tool_blocks_planning_tools():

@@ -654,13 +654,16 @@ class Agent:
         self.emit = emit
 
         def record(data):
-            emit("record", data)
+            payload = dict(data)
+            payload["conversation_id"] = self._record_conversation_id
+            emit("record", payload)
 
         self.record = record
         self.client = None
         self.model = None
         self.history = []
         self.conversation_id = conversation_store.new_id()
+        self._record_conversation_id = self.conversation_id
         self.plan = []
         self._choice_lock = threading.Lock()
         self._choices = {}
@@ -681,6 +684,7 @@ class Agent:
 
     def load_conversation(self, cid):
         self.conversation_id = str(cid or conversation_store.new_id())
+        self._record_conversation_id = self.conversation_id
         data = conversation_store.read(self.conversation_id)
         self.history = _clip_history(data.get("messages", []))
         self.plan = []
@@ -724,8 +728,12 @@ class Agent:
         options = [_shorten(x, 160) for x in options if str(x).strip()][:4]
         if len(options) < 2:
             return _fail("选择题至少需要2个选项", error_code="bad_arguments", retryable=False)
+        def normalize_answer_text(text):
+            return re.sub(r"[\s\W_]+", "", str(text).lower())
+
+        corpus = normalize_answer_text(question) + "".join(normalize_answer_text(o) for o in options)
         sensitive = "、".join(w for w in _SENSITIVE_CHOICE_WORDS
-                           if w in question.lower() or any(w in str(o).lower() for o in options))
+                           if normalize_answer_text(w) in corpus)
         if sensitive:
             return _fail("选择题不能询问敏感信息（%s）" % sensitive,
                          error_code="sensitive_choice", retryable=False)
@@ -933,6 +941,10 @@ class Agent:
             self.emit("msg", hint)
             self.record({"type": "msg", "text": hint})
 
-        self.history = _clip_history(messages[2:])
+        self.history = _clip_history([
+            m for m in messages[2:]
+            if not (isinstance(m, dict) and m.get("role") == "system"
+                    and str(m.get("content", "")).startswith("本轮规则意图解析："))
+        ])
         conversation_store.save(self.conversation_id, self.history,
                                 title=_shorten(user_text, 40))
