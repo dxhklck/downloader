@@ -9,6 +9,7 @@ import uuid
 import config
 
 _STORE_LOCK = threading.RLock()
+_DELETED_IDS = set()
 
 
 def _dir():
@@ -49,7 +50,7 @@ HISTORY_MAX_RECORDS = 300
 
 def _write(cid, data):
     path = _path(cid)
-    if not path:
+    if not path or str(cid) in _DELETED_IDS:
         return False
     tmp = path + ".tmp"
     try:
@@ -156,17 +157,24 @@ def delete(cid):
     path = _path(cid)
     if not path:
         return False
-    try:
-        os.remove(path)
-        return True
-    except OSError:
-        return False
+    with _STORE_LOCK:
+        try:
+            _DELETED_IDS.add(str(cid))
+            if os.path.exists(path):
+                os.remove(path)
+            return True
+        except OSError:
+            _DELETED_IDS.discard(str(cid))
+            return False
 
 
 def list_all():
     out = []
     for name in os.listdir(_dir()):
         if not name.endswith(".json"):
+            continue
+        cid = name[:-5]
+        if cid in _DELETED_IDS:
             continue
         path = os.path.join(_dir(), name)
         try:
