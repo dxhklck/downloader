@@ -56,8 +56,10 @@ def test_download_batch_enqueues_downloads_and_agent_report():
     assert result["ok"] is True
     assert len(result["ids"]) == 2  # 1 个下载 + 1 个 Agent 汇报
     jobs = list(api._jobs.queue)
-    assert jobs[0]["name"] == "url_download"
-    assert jobs[0]["args"]["out_dir"] == "课程"
+    download_jobs = [j for j in jobs if j.get("name") == "url_download"]
+    assert len(download_jobs) == 1
+    assert all(j["args"]["url"].startswith("http") for j in download_jobs)
+    assert download_jobs[0]["args"]["out_dir"] == "课程"
     assert jobs[1]["kind"] == "chat"
     assert "用户已选择" in jobs[1]["text"]
 
@@ -86,6 +88,24 @@ def test_switch_conversation_migrates_legacy_display(tmp_path, monkeypatch):
     switched = api.switch_conversation(cid)
     assert switched["records"][0]["type"] == "msg"
     assert "旧消息" in switched["records"][0]["text"]
+
+
+def test_asset_trash_batch_summarizes_failures(monkeypatch):
+    api = main.Api()
+    monkeypatch.setattr(main.tools, "trash_asset", lambda path: (
+        {"success": True} if path == "ok.mp4" else {"success": False, "message": "占用中"}))
+    result = api.asset_trash_batch(["ok.mp4", "bad.mp4"])
+    assert result["success"] is True
+    assert result["data"]["ok"] == 1
+    assert result["data"]["failed"][0]["path"] == "bad.mp4"
+
+
+def test_retry_tool_allows_whitelisted_tool():
+    api = main.Api()
+    result = api.retry_tool("url_download", {"url": "https://example.com/v", "evil": 1})
+    assert result["ok"] is True
+    job = list(api._jobs.queue)[-1]
+    assert job["args"]["url"] == "https://example.com/v"
 
 
 def test_retry_tool_blocks_planning_tools():

@@ -1,10 +1,10 @@
 # 运行时依赖
-pywebview>=5.4
-openai>=1.40
-httpx>=0.27
-playwright>=1.47
+pywebview>=5.4,<7
+openai>=1.40,<2
+httpx>=0.27,<1
+playwright>=1.47,<2
 yt-dlp==2026.10.26
-Pillow>=13.0          # 图标生成（make_icon.py）；10.x 有已知安全漏洞
+Pillow>=11.0,<14      # 图标生成（make_icon.py）；10.x 有已知安全漏洞
 
 # Linux 需要额外系统包（GTK 后端）：
 #   Ubuntu/Debian: sudo apt install python3-gi gir1.2-webkit2gtk-4.1 libgirepository1.0-dev
