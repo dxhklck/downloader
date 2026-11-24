@@ -49,13 +49,19 @@ let currentConversationId = null;
 function saveHistory() { /* 兼容旧调用：记录已由服务端维护 */ }
 
 function applyRecords(records) {
-  if (!Array.isArray(records)) return false;
   const log = $('chatLog');
   log.innerHTML = '';
-  // 先恢复基础对话，选择卡和搜索卡在真实点击后仍可重新操作。
+  if (!Array.isArray(records) || !records.length) {
+    const empty = document.createElement('div');
+    empty.className = 'chat-empty';
+    empty.textContent = '这个会话还没有消息。在下面输入一句话开始吧。';
+    log.appendChild(empty);
+    scrollChat();
+    return false;
+  }
   records.forEach((rec) => renderRecord(rec, log));
   scrollChat();
-  return records.length > 0;
+  return true;
 }
 
 function renderRecord(rec, log) {
@@ -68,7 +74,7 @@ function renderRecord(rec, log) {
     if (card) log.appendChild(card);
   } else if (t === 'user') addMessage(rec.text || '', 'user');
   else if (t === 'msg' || t === 'status') addMessage(rec.text || '', 'agent');
-  else if (t === 'tool_start') addToolStatus(rec.name || '', rec.args || {});
+  else if (t === 'tool_start') addToolStatus(rec.name || '', rec.args || {}, rec.tool_call_id);
   else if (t === 'tool_done') {
     const d = rec.payload || {};
     const card = findToolCard(d.tool_call_id, true);
@@ -197,6 +203,8 @@ function addMessage(text, who) {
   div.innerHTML =
     '<div class="msg-avatar">' + avatar + '</div>' +
     '<div class="msg-body"><div class="msg-text">' + escapeHtml(text) + '</div></div>';
+  const empty = $('chatLog').querySelector('.chat-empty');
+  if (empty) empty.remove();
   $('chatLog').appendChild(div);
   scrollChat();
   saveHistory();
@@ -250,6 +258,8 @@ function planCard(steps) {
   div.innerHTML = '<div class="msg-avatar">助</div><div class="msg-body">' +
     '<div class="plan-card"><div class="plan-head">执行计划</div><ol class="plan-list">' +
     items + '</ol></div></div>';
+  const empty = $('chatLog').querySelector('.chat-empty');
+  if (empty) empty.remove();
   $('chatLog').appendChild(div);
   scrollChat();
   saveHistory();
@@ -330,6 +340,8 @@ function searchResultsCard(data) {
     (all || selected).disabled = true;
     downloadChosen(picked, data.out_dir, data.quality, all || selected);
   });
+  const empty = $('chatLog').querySelector('.chat-empty');
+  if (empty) empty.remove();
   $('chatLog').appendChild(div);
   scrollChat();
   saveHistory();
@@ -379,14 +391,16 @@ function toolStatusCard(name, args, status) {
     '</div></div></div>';
 }
 
-function addToolStatus(name, args) {
+function addToolStatus(name, args, toolCallId) {
+  if (toolCallId && findToolCard(toolCallId, true)) return;
   const div = document.createElement('div');
   div.innerHTML = toolStatusCard(name, args, { cls: 'pending', text: '调用中' });
   const card = div.firstChild;
   $('chatLog').appendChild(card);
   card.dataset.toolName = name;
   card.dataset.toolArgs = JSON.stringify(args || {});
-  if (lastToolEventId) card.dataset.toolCallId = lastToolEventId;
+  const callId = toolCallId || lastToolEventId || '';
+  if (callId) card.dataset.toolCallId = callId;
   lastToolCall = { name, args: args || {} };
   scrollChat();
   saveHistory();
@@ -490,6 +504,8 @@ function showThinking() {
   div.className = 'msg msg-agent thinking';
   div.innerHTML = '<div class="msg-avatar">助</div>' +
     '<div class="msg-body"><div class="msg-text">排队中...</div></div>';
+  const empty = $('chatLog').querySelector('.chat-empty');
+  if (empty) empty.remove();
   $('chatLog').appendChild(div);
   scrollChat();
   return div;
@@ -545,7 +561,9 @@ function endTurn(jobId) {
 async function poll() {
   try {
     const events = await api.poll();
+    const activeConversation = currentConversationId;
     events.forEach((ev) => {
+      if (ev.data && ev.data.conversation_id && ev.data.conversation_id !== activeConversation) return;
       switch (ev.event) {
         case 'record':
           // 记录用于会话回放；实时展示仍由 msg/tool/result 等事件负责。
@@ -563,7 +581,7 @@ async function poll() {
           else if (runningJobId) clearThinking(runningJobId);
           else removeThinking();
           lastToolEventId = ev.data && ev.data.tool_call_id ? ev.data.tool_call_id : null;
-          addToolStatus(ev.data.name, ev.data.args);
+          addToolStatus(ev.data.name, ev.data.args, lastToolEventId);
           break;
         case 'tool_done':
           if (ev.data && ev.data.tool_call_id) {

@@ -43,12 +43,15 @@ class Api:
         return {"ok": False, "code": code or "error", "message": msg, "detail": str(e)[:300]}
 
     def _emit(self, event, data):
-        self.q.put({"event": event, "data": data})
+        payload = dict(data) if isinstance(data, dict) else data
+        if isinstance(payload, dict) and self._current_job:
+            payload.setdefault("conversation_id", self._current_job.get("cid") or self.agent.conversation_id)
+        self.q.put({"event": event, "data": payload})
         if event == "record" and self._current_job:
             import conversation_store
-            cid = data.get("conversation_id") or self._current_job.get("cid") or self.agent.conversation_id
-            payload = {k: v for k, v in data.items() if k != "conversation_id"}
-            conversation_store.append_record(cid, payload)
+            cid = payload.get("conversation_id") or self.agent.conversation_id
+            record = {k: v for k, v in payload.items() if k != "conversation_id"}
+            conversation_store.append_record(cid, record)
 
     # ---- 界面轮询 ----
     def poll(self):

@@ -212,7 +212,7 @@ button { -webkit-appearance: none; appearance: none; }
 
 .hidden { display: none !important; }
 
-.app { position: relative; display: flex; flex-direction: column; height: 100vh; min-width: 960px; min-height: 640px; }
+.app { position: relative; display: flex; flex-direction: column; height: 100vh; width: 100%; min-width: 760px; min-height: 520px; overflow: hidden; }
 
 /* 滚动条 */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -995,11 +995,12 @@ details.adv-field .field { margin-top: 10px; }
 .asset-scan-note { color: var(--text-muted); margin-left: 6px; }
 
 @media (max-width: 1000px) {
-  .main { flex-direction: column; }
-  .conversation-panel, .side-panel, .asset-side { flex: none; width: 100%; }
+  .main { flex-direction: column; overflow-y: auto; }
+  .conversation-panel { flex: 0 0 auto; width: 100%; }
+  .side-panel, .asset-side { flex: 0 0 auto; width: 100%; }
   .conversation-list { flex-direction: row; overflow-x: auto; }
   .conversation-item { flex: 0 0 160px; }
-  .chat-panel { flex: 1 1 auto; }
+  .chat-panel { flex: 1 0 360px; min-height: 360px; }
   .asset-side { display: flex; align-items: center; gap: 8px; overflow-x: auto; }
   .asset-side .cat-tree { display: flex; gap: 6px; }
   .asset-side h3 { display: none; }

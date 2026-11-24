@@ -105,8 +105,8 @@ def test_search_videos_bili_ignores_injected_proxy(monkeypatch):
         def __init__(self, opts):
             assert "proxy" not in opts
             assert opts["http_headers"]["Referer"] == "https://www.bilibili.com/"
-            assert "HTTP_PROXY" not in os.environ
-            assert "HTTPS_PROXY" not in os.environ
+            assert "VD_TEST_HTTP_PROXY" not in os.environ
+            assert "VD_TEST_HTTPS_PROXY" not in os.environ
 
         def __enter__(self):
             return self
@@ -117,15 +117,16 @@ def test_search_videos_bili_ignores_injected_proxy(monkeypatch):
         def extract_info(self, query, download=False):
             return {"entries": [{"title": "视频A", "url": "https://www.bilibili.com/video/BV1"}]}
 
-    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
-    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
-    monkeypatch.setattr(config if "config" in globals() else tools.config,
-                        "proxy_url", lambda: "")
+    test_keys = ("VD_TEST_HTTP_PROXY", "VD_TEST_HTTPS_PROXY")
+    monkeypatch.setattr(tools, "PROXY_ENV_KEYS", test_keys)
+    for key in test_keys:
+        monkeypatch.setenv(key, "http://127.0.0.1:9")
+    monkeypatch.setattr(tools.config, "proxy_url", lambda: "")
     monkeypatch.setattr(tools.config, "system_proxy_url", lambda: "")
     monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FakeYdl))
     result = tools.search_videos("信息科技", platform="bili", count=1)
     assert result["success"] is True
-    assert os.environ["HTTP_PROXY"] == "http://127.0.0.1:9"
+    assert os.environ["VD_TEST_HTTP_PROXY"] == "http://127.0.0.1:9"
 
 
 def test_remember_result_keeps_recent_summary():
