@@ -164,6 +164,22 @@ async function switchConversation(cid) {
   } catch (e) { addResult({ success: false, message: friendlyError(e), detail: String(e) }); }
 }
 
+async function deleteAllConversations() {
+  const ok = await askConfirm('全部删除',
+    '将清空本机保存的所有会话及模型上下文，无法恢复。', '全部删除');
+  if (!ok) return;
+  try {
+    const r = await api.delete_all_conversations();
+    if (!r || !r.ok) throw new Error((r && r.message) || '清空失败');
+    selectedConversations.clear();
+    currentConversationId = null;
+    clearHistory();
+    applyRecords([]);
+    await refreshConversations();
+    addMessage('已清空全部会话，可以开始新对话。', 'agent');
+  } catch (e) { addResult({ success: false, message: friendlyError(e), detail: String(e) }); }
+}
+
 async function deleteConversation() {
   const ids = Array.from(selectedConversations);
   if (!ids.length) {
@@ -1204,6 +1220,7 @@ onReady(async () => {
   $('clearChatBtn').addEventListener('click', clearHistory);
   $('newConversationBtn').addEventListener('click', newConversation);
   $('deleteConversationBtn').addEventListener('click', deleteConversation);
+  $('deleteAllConversationsBtn').addEventListener('click', deleteAllConversations);
   $('conversationSelect').addEventListener('change', (e) => switchConversation(e.target.value));
   $('cancelTaskBtn').addEventListener('click', async () => {
     try {

@@ -188,4 +188,21 @@ def list_all():
         except (OSError, ValueError, TypeError):
             continue
     out.sort(key=lambda x: x.get("updated_at") or 0, reverse=True)
-    return out[:30]
+    return out
+
+
+def delete_all():
+    """清空所有会话文件。"""
+    deleted = 0
+    with _STORE_LOCK:
+        for name in os.listdir(_dir()):
+            if not name.endswith(".json"):
+                continue
+            cid = name[:-5]
+            _DELETED_IDS.add(cid)
+            try:
+                os.remove(os.path.join(_dir(), name))
+                deleted += 1
+            except OSError:
+                pass
+    return deleted

@@ -702,6 +702,11 @@ class Agent:
             self.new_conversation()
         return {"ok": True, "message": "会话已删除"}
 
+    def delete_all_conversations(self):
+        count = conversation_store.delete_all()
+        self.new_conversation()
+        return {"ok": True, "count": count, "message": f"已清空 {count} 个会话"}
+
     def list_conversations(self):
         return {"ok": True, "items": conversation_store.list_all(),
                 "current": self.conversation_id}

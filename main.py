@@ -175,6 +175,9 @@ class Api:
     def delete_conversation(self, cid):
         return self.agent.delete_conversation(cid)
 
+    def delete_all_conversations(self):
+        return self.agent.delete_all_conversations()
+
     def confirm_organize(self, preview_id, confirmed=False):
         """批量整理确认：未确认时不执行；确认后走队列重放预览 id。"""
         if not confirmed:
