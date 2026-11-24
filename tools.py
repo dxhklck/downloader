@@ -1452,11 +1452,23 @@ def search_videos(keyword, platform="all", count=8, out_dir=None, quality="best"
         "quiet": True, "no_warnings": True, "extract_flat": True,
         "skip_download": True, "playlistend": cap,
         "socket_timeout": 30, "retries": 1,
+        "http_headers": {
+            "User-Agent": UA,
+            "Referer": "https://www.bilibili.com/" if prefix == "bilisearch" else "https://www.youtube.com/",
+            "Accept": "application/json, text/plain, */*",
+        },
     }
     px = config.proxy_url() or config.system_proxy_url()
-    if px:
-        opts["proxy"] = px
+    proxy_keys = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY")
+    saved_proxy = {}
     try:
+        if px:
+            opts["proxy"] = px
+        # B站直连即可；环境里注入的代理会让 API 返回 412。
+        if not px and prefix == "bilisearch":
+            for name in proxy_keys:
+                if name in os.environ:
+                    saved_proxy[name] = os.environ.pop(name)
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info("%s%d:%s" % (prefix, cap, keyword), download=False)
         items = []
@@ -1480,6 +1492,9 @@ def search_videos(keyword, platform="all", count=8, out_dir=None, quality="best"
                    out_dir=out_dir or "", quality=quality or "best")
     except Exception as e:
         return _fail("搜索失败：" + str(e)[:150], error_code="search_failed")
+    finally:
+        for name, value in saved_proxy.items():
+            os.environ[name] = value
 
 
 def url_download(url, quality="best", out_dir=None):

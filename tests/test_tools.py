@@ -87,6 +87,38 @@ def test_search_videos_rejects_douyin_keyword_search():
     assert result["error_code"] == "unsupported_search_platform"
 
 
+def test_search_videos_bili_ignores_injected_proxy(monkeypatch):
+    import os
+    import sys
+    import types
+
+    class FakeYdl:
+        def __init__(self, opts):
+            assert "proxy" not in opts
+            assert opts["http_headers"]["Referer"] == "https://www.bilibili.com/"
+            assert "HTTP_PROXY" not in os.environ
+            assert "HTTPS_PROXY" not in os.environ
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, query, download=False):
+            return {"entries": [{"title": "视频A", "url": "https://www.bilibili.com/video/BV1"}]}
+
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setattr(config if "config" in globals() else tools.config,
+                        "proxy_url", lambda: "")
+    monkeypatch.setattr(tools.config, "system_proxy_url", lambda: "")
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FakeYdl))
+    result = tools.search_videos("信息科技", platform="bili", count=1)
+    assert result["success"] is True
+    assert os.environ["HTTP_PROXY"] == "http://127.0.0.1:9"
+
+
 def test_remember_result_keeps_recent_summary():
     tools.STATE["recent_results"] = []
     tools.remember_result({"success": True, "message": "已下载测试视频"}, "url_download")

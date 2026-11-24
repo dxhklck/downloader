@@ -92,6 +92,35 @@ function clearHistory() {
   $('chatLog').innerHTML = '';
 }
 
+const selectedConversations = new Set();
+
+function renderConversationList(items, activeId) {
+  const box = $('conversationList');
+  if (!box) return;
+  const valid = new Set(items.map((c) => c.id));
+  Array.from(selectedConversations).forEach((id) => {
+    if (!valid.has(id)) selectedConversations.delete(id);
+  });
+  box.innerHTML = items.length
+    ? items.map((c) => '<div class="conversation-item' + (c.id === activeId ? ' active' : '') + '">' +
+        '<input type="checkbox" class="conversation-check" data-cid="' + escapeHtml(c.id) + '"' +
+        (selectedConversations.has(c.id) ? ' checked' : '') + ' aria-label="选择会话">' +
+        '<button class="conversation-open" data-cid="' + escapeHtml(c.id) + '">' +
+        '<span class="conversation-title">' + escapeHtml(c.title || '新对话') + '</span>' +
+        '<span class="conversation-time">' + (c.updated_at ? new Date(c.updated_at * 1000).toLocaleDateString('zh-CN') : '') + '</span>' +
+        '</button></div>').join('')
+    : '<div class="conversation-empty">还没有会话</div>';
+  box.querySelectorAll('.conversation-check').forEach((el) => {
+    el.addEventListener('change', () => {
+      if (el.checked) selectedConversations.add(el.dataset.cid);
+      else selectedConversations.delete(el.dataset.cid);
+    });
+  });
+  box.querySelectorAll('.conversation-open').forEach((btn) => {
+    btn.addEventListener('click', () => switchConversation(btn.dataset.cid));
+  });
+}
+
 async function refreshConversations(preferredId) {
   const select = $('conversationSelect');
   if (!select) return;
@@ -99,11 +128,15 @@ async function refreshConversations(preferredId) {
     const r = await api.list_conversations();
     const items = (r && r.items) || [];
     currentConversationId = preferredId || (r && r.current) || (items[0] && items[0].id) || null;
+    if (currentConversationId && !items.some((c) => c.id === currentConversationId)) {
+      items.unshift({ id: currentConversationId, title: '新对话', updated_at: 0 });
+    }
     select.innerHTML = items.length
       ? items.map((c) => '<option value="' + escapeHtml(c.id) + '">' +
           escapeHtml(c.title || '新对话') + '</option>').join('')
       : '<option value="">新对话</option>';
     if (currentConversationId) select.value = currentConversationId;
+    renderConversationList(items, currentConversationId);
   } catch (e) { console.error('会话列表加载失败', e); }
 }
 
@@ -128,19 +161,31 @@ async function switchConversation(cid) {
 }
 
 async function deleteConversation() {
-  const cid = $('conversationSelect').value;
-  if (!cid) return;
-  if (!confirm('删除这个会话？界面显示也会清空，服务端上下文一并删除。')) return;
+  const ids = Array.from(selectedConversations);
+  if (!ids.length) {
+    const current = $('conversationSelect').value;
+    if (current) ids.push(current);
+  }
+  if (!ids.length) return;
+  const ok = await askConfirm('删除会话',
+    `删除 ${ids.length} 个会话？对话记录和模型上下文会一并清除，无法恢复。`,
+    `删除 ${ids.length} 个会话`);
+  if (!ok) return;
   try {
-    const r = await api.delete_conversation(cid);
-    if (!r || !r.ok) throw new Error((r && r.message) || '删除失败');
-    await refreshConversations();
-    if (!currentConversationId) await newConversation();
-    else {
-      const r2 = await api.switch_conversation(currentConversationId);
+    for (const cid of ids) {
+      const r = await api.delete_conversation(cid);
+      if (!r || !r.ok) throw new Error((r && r.message) || '删除失败');
+    }
+    selectedConversations.clear();
+    const keep = ids.includes(currentConversationId) ? null : currentConversationId;
+    await refreshConversations(keep);
+    if (keep) {
+      const r2 = await api.switch_conversation(keep);
       clearHistory();
       applyRecords(r2 && r2.records);
-      await refreshConversations(currentConversationId);
+      await refreshConversations(keep);
+    } else {
+      await newConversation();
     }
   } catch (e) { addResult({ success: false, message: friendlyError(e), detail: String(e) }); }
 }
