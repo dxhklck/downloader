@@ -23,24 +23,29 @@ def new_id():
     return "c%s" % int(time.time() * 1000)
 
 
-def load(cid):
+def read(cid):
     path = _path(cid)
     if not path or not os.path.isfile(path):
-        return []
+        return {}
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        return data.get("messages", []) if isinstance(data, dict) else []
+        return data if isinstance(data, dict) else {}
     except (OSError, ValueError, TypeError):
-        return []
+        return {}
 
 
-def save(cid, messages, title=""):
+def load(cid):
+    return read(cid).get("messages", [])
+
+
+HISTORY_MAX_RECORDS = 300
+
+
+def _write(cid, data):
     path = _path(cid)
     if not path:
         return False
-    data = {"id": cid, "title": str(title or "")[:60],
-            "updated_at": time.time(), "messages": messages or []}
     tmp = path + ".tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as f:
@@ -53,6 +58,84 @@ def save(cid, messages, title=""):
         except OSError:
             pass
         return False
+
+
+def save(cid, messages, title="", display=None, events=None):
+    old = read(cid)
+    data = {"id": cid, "title": str(title or old.get("title") or "")[:60],
+            "updated_at": time.time(), "messages": messages or [],
+            "display": display if display is not None else old.get("display", []),
+            "events": events if events is not None else old.get("events", []),
+            "records": old.get("records", [])}
+    return _write(cid, data)
+
+
+def append_record(cid, record):
+    """把一条界面记录追加到同一会话流水，和 messages 一起持久化。"""
+    data = read(cid)
+    records = data.get("records") or []
+    records.append(record)
+    data["records"] = records[-HISTORY_MAX_RECORDS:]
+    data["updated_at"] = time.time()
+    return _write(cid, data)
+
+
+def _record_from_message(message):
+    if not isinstance(message, dict):
+        return None
+    role = message.get("role")
+    content = message.get("content")
+    if isinstance(content, list):
+        content = "".join(str(x.get("text") or "") for x in content if isinstance(x, dict))
+    text = str(content or "")
+    if role == "user":
+        return {"type": "user", "text": text}
+    if role == "assistant":
+        return {"type": "msg", "text": text} if text and text != "None" else None
+    if role == "tool":
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            payload = None
+        if not isinstance(payload, dict):
+            payload = {"message": text}
+        return {"type": "result", "payload": payload}
+    return None
+
+
+def migrate_legacy(cid):
+    """旧会话优先迁移 display，其次从模型上下文还原可读流水。"""
+    data = read(cid)
+    if data.get("records"):
+        return data["records"]
+    records = []
+    display = data.get("display") or []
+    if isinstance(display, list):
+        records = [{"type": "html", "html": str(item)} for item in display if item]
+    if not records:
+        for message in data.get("messages") or []:
+            record = _record_from_message(message)
+            if record:
+                records.append(record)
+    if not records:
+        return []
+    data["records"] = records[-HISTORY_MAX_RECORDS:]
+    _write(cid, data)
+    return data["records"]
+
+
+def _title_from(data):
+    for record in data.get("records") or []:
+        if isinstance(record, dict) and record.get("type") == "user":
+            text = str(record.get("text") or "").strip()
+            if text:
+                return text[:60]
+    for message in data.get("messages") or []:
+        if isinstance(message, dict) and message.get("role") == "user":
+            text = str(message.get("content") or "").strip()
+            if text:
+                return text[:60]
+    return "新对话"
 
 
 def delete(cid):
@@ -78,9 +161,8 @@ def list_all():
             if not isinstance(data, dict):
                 continue
             out.append({"id": data.get("id") or name[:-5],
-                        "title": data.get("title") or "未命名对话",
-                        "updated_at": data.get("updated_at") or 0,
-                        "messages": len(data.get("messages") or [])})
+                        "title": data.get("title") or _title_from(data),
+                        "updated_at": data.get("updated_at") or 0})
         except (OSError, ValueError, TypeError):
             continue
     out.sort(key=lambda x: x.get("updated_at") or 0, reverse=True)

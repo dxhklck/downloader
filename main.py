@@ -44,6 +44,9 @@ class Api:
 
     def _emit(self, event, data):
         self.q.put({"event": event, "data": data})
+        if event == "record" and self._current_job:
+            import conversation_store
+            conversation_store.append_record(self.agent.conversation_id, data)
 
     # ---- 界面轮询 ----
     def poll(self):
@@ -64,6 +67,11 @@ class Api:
             with self._job_lock:
                 self._current_job = job
                 self._sync_queue()
+            if job["kind"] == "chat":
+                self._emit("record", {"type": "user", "text": job.get("text", "")})
+            elif job["kind"] == "tool":
+                self._emit("record", {"type": "tool_start", "name": job.get("name", ""),
+                                      "args": job.get("args", {})})
             self._emit("job_start", {"id": job["id"], "kind": job["kind"]})
             try:
                 self._chat_busy.acquire()
@@ -134,6 +142,10 @@ class Api:
         """用户发言：进入 FIFO 队列，由单 worker 顺序执行。"""
         job_id = self._enqueue("chat", text=text)
         return {"ok": True, "id": job_id, "message": "已加入队列"}
+
+    def save_conversation_display(self, html_items):
+        """兼容旧前端：现在会话记录由服务端 record 事件统一维护。"""
+        return {"ok": True}
 
     def answer_choice(self, answer_id, value):
         """前端选择题回调：把用户选择送回等待中的 Agent 工具。"""

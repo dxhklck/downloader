@@ -133,6 +133,21 @@ def test_site_login_rejects_bad_url():
     assert "http" in result["message"]
 
 
+def test_ensure_cookie_file_repairs_legacy_format(tmp_path):
+    path = tmp_path / "cookies.txt"
+    path.write_text("www.douyin.com\tTRUE\t/\tFALSE\t0\tsid\t1\n", encoding="utf-8")
+    tools._ensure_cookie_file(str(path))
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("# Netscape HTTP Cookie File\n")
+    assert "www.douyin.com\tFALSE\t/\tFALSE\t0\tsid\t1" in text
+
+
+def test_write_cookie_file_adds_netscape_header(tmp_path):
+    path = tmp_path / "cookies.txt"
+    assert tools._write_cookie_file("www.douyin.com\tTRUE\t/\tFALSE\t0\tsid\t1", str(path)) is True
+    assert path.read_text(encoding="utf-8").startswith("# Netscape HTTP Cookie File\n")
+
+
 def test_get_login_status_never_returns_cookie_values(tmp_path, monkeypatch):
     bili = tmp_path / "bili.txt"
     bili.write_text(".bilibili.com\tTRUE\t/\tFALSE\t0\tSESSDATA\tsecret\n", encoding="utf-8")

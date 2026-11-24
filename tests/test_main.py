@@ -33,6 +33,20 @@ def test_bg_task_emits_done_on_exception():
     raise AssertionError("未收到 site_login_done 事件")
 
 
+def test_record_events_persist_to_current_conversation(tmp_path, monkeypatch):
+    import conversation_store
+    monkeypatch.setattr(conversation_store.config, "CONVERSATIONS_DIR", str(tmp_path))
+    api = main.Api()
+    cid = api.agent.conversation_id
+    api._current_job = {"kind": "chat", "id": 0}
+    api._emit("record", {"type": "user", "text": "测试记录"})
+    api._current_job = None
+    records = conversation_store.read(cid).get("records") or []
+    assert records and records[-1]["text"] == "测试记录"
+    switched = api.switch_conversation(cid)
+    assert switched["records"][-1]["text"] == "测试记录"
+
+
 def test_download_batch_enqueues_downloads_and_agent_report():
     api = main.Api()
     result = api.download_batch([
@@ -46,6 +60,33 @@ def test_download_batch_enqueues_downloads_and_agent_report():
     assert jobs[0]["args"]["out_dir"] == "课程"
     assert jobs[1]["kind"] == "chat"
     assert "用户已选择" in jobs[1]["text"]
+
+
+def test_list_conversations_shows_title_without_message_count(tmp_path, monkeypatch):
+    import conversation_store
+    monkeypatch.setattr(conversation_store.config, "CONVERSATIONS_DIR", str(tmp_path))
+    cid = conversation_store.new_id()
+    conversation_store.save(cid, [{"role": "user", "content": "测试标题"}], title="")
+    api = main.Api()
+    items = api.list_conversations()["items"]
+    assert items[0]["title"] == "测试标题"
+    assert "messages" not in items[0]
+
+
+def test_switch_conversation_migrates_legacy_display(tmp_path, monkeypatch):
+    import conversation_store
+    monkeypatch.setattr(conversation_store.config, "CONVERSATIONS_DIR", str(tmp_path))
+    cid = conversation_store.new_id()
+    conversation_store.save(cid, [{"role": "user", "content": "旧会话"}],
+                            display=['<div class="msg msg-user">旧消息</div>'])
+    data = conversation_store.read(cid)
+    data.pop("records", None)
+    (tmp_path / (cid + ".json")).write_text(__import__("json").dumps(data, ensure_ascii=False),
+                                            encoding="utf-8")
+    api = main.Api()
+    switched = api.switch_conversation(cid)
+    assert switched["records"][0]["type"] == "html"
+    assert "旧消息" in switched["records"][0]["html"]
 
 
 def test_retry_tool_blocks_planning_tools():

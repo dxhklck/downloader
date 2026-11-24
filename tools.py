@@ -1085,17 +1085,61 @@ def _cookies_to_lines(cookies):
     """Playwright cookie 列表 -> Netscape 格式行。"""
     lines = []
     for c in cookies:
-        domain = c.get("domain", "")
-        host_only = "FALSE" if domain.startswith(".") else "TRUE"
+        domain = str(c.get("domain", "") or "").strip().lstrip(".")
+        if not domain:
+            continue
+        host_only = "FALSE" if c.get("domain", "").startswith(".") else "TRUE"
         expires = int(c.get("expires", -1) or -1)
         if expires < 0:
             expires = 0
         lines.append("\t".join([
-            domain, host_only, c.get("path", "/"),
+            "." + domain if not host_only == "TRUE" else domain,
+            host_only, c.get("path", "/") or "/",
             "TRUE" if c.get("secure") else "FALSE",
-            str(expires), c.get("name", ""), c.get("value", ""),
+            str(expires), str(c.get("name", "") or ""), str(c.get("value", "") or ""),
         ]))
     return lines
+
+
+def _ensure_cookie_file(path):
+    """修复旧 Cookie 文件的 Netscape 头与域名格式，避免 yt-dlp 拒绝加载。"""
+    if not path or not os.path.isfile(path):
+        return path
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        rows = []
+        changed = not any(x.startswith("# Netscape") or x.startswith("# HTTP Cookie")
+                          for x in lines[:3])
+        for line in lines:
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 7:
+                changed = True
+                continue
+            raw_domain = parts[0].strip()
+            domain = raw_domain.lstrip(".")
+            if not domain or not parts[5].strip():
+                changed = True
+                continue
+            specified = raw_domain.startswith(".")
+            normalized = [("." if specified else "") + domain,
+                          "TRUE" if specified else "FALSE",
+                          parts[2] or "/", parts[3] or "FALSE", parts[4] or "0",
+                          parts[5].strip(), parts[6]]
+            row = "\t".join(normalized)
+            if row != line:
+                changed = True
+            rows.append(row)
+        if changed:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("# Netscape HTTP Cookie File\n")
+                if rows:
+                    f.write("\n".join(rows) + "\n")
+        return path
+    except OSError:
+        return path
 
 
 def _merge_cookie_lines(path, new_lines):
@@ -1280,8 +1324,11 @@ def _write_cookie_file(cookie_str, path):
         return False
     try:
         if s.startswith("# Netscape") or "\t" in s:
+            lines = s.splitlines()
+            if not any(x.startswith("# Netscape") or x.startswith("# HTTP Cookie") for x in lines[:3]):
+                lines.insert(0, "# Netscape HTTP Cookie File")
             with open(path, "w", encoding="utf-8") as f:
-                f.write(s if s.endswith("\n") else s + "\n")
+                f.write("\n".join(lines) + "\n")
         else:
             lines = ["# Netscape HTTP Cookie File"]
             for part in s.split(";"):
@@ -1512,6 +1559,7 @@ def url_download(url, quality="best", out_dir=None):
         temp_cookie = True
         _log("已加载小红书 Cookie（手动粘贴）")
     if cookie_path:
+        _ensure_cookie_file(cookie_path)
         opts["cookiefile"] = cookie_path
     # 代理：优先用设置里配的；否则清掉环境里的注入代理（WorkBuddy 的 127.0.0.1 代理
     # 常返回 502，会挡住 YouTube）。用临时环境，结束后恢复，不影响同进程其它下载。

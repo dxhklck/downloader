@@ -652,6 +652,11 @@ class Agent:
     def __init__(self, emit):
         """emit(event, data) 用于向界面推送消息/工具调用。"""
         self.emit = emit
+
+        def record(data):
+            emit("record", data)
+
+        self.record = record
         self.client = None
         self.model = None
         self.history = []
@@ -676,9 +681,12 @@ class Agent:
 
     def load_conversation(self, cid):
         self.conversation_id = str(cid or conversation_store.new_id())
-        self.history = _clip_history(conversation_store.load(self.conversation_id))
+        data = conversation_store.read(self.conversation_id)
+        self.history = _clip_history(data.get("messages", []))
         self.plan = []
-        return {"ok": True, "id": self.conversation_id, "messages": len(self.history)}
+        records = conversation_store.migrate_legacy(self.conversation_id)
+        return {"ok": True, "id": self.conversation_id, "messages": len(self.history),
+                "records": records}
 
     def new_conversation(self):
         return self.load_conversation(conversation_store.new_id())
@@ -728,6 +736,7 @@ class Agent:
         with self._choice_lock:
             self._choices[answer_id] = entry
         self.emit("ask_choice", {"id": answer_id, "question": question, "options": options})
+        self.record({"type": "ask_choice", "payload": {"id": answer_id, "question": question, "options": options}})
         try:
             waited = event.wait(MAX_ANSWER_WAIT_SEC)
         finally:
@@ -744,6 +753,7 @@ class Agent:
             return _fail("执行计划至少需要2个步骤", error_code="bad_arguments", retryable=False)
         self.plan = steps
         self.emit("plan", {"steps": steps})
+        self.record({"type": "plan", "steps": steps})
         return _ok("已生成执行计划", steps=steps)
 
     def _organize_preview(self, args):
@@ -755,6 +765,7 @@ class Agent:
         ))
         if result["success"]:
             self.emit("organize_preview", result["data"])
+            self.record({"type": "organize_preview", "payload": result["data"]})
             result["message"] += "；请在界面确认后再执行"
         return result
 
@@ -781,6 +792,7 @@ class Agent:
                     result["message"] += "（已自动缩短关键词重试）"
         if result["success"]:
             self.emit("search_results", result["data"])
+            self.record({"type": "search_results", "payload": result["data"]})
             result["next_action"] = (
                 "候选已展示，等待用户在界面点选。现在停止调用工具，用一句话告诉用户"
                 "“已列出搜索结果，请点选要下载的视频或点下载全部”，不要再追问关键词，也不要重复搜索。"
@@ -792,6 +804,8 @@ class Agent:
         started = time.monotonic()
         self.emit("tool", {"name": name, "args": args, "status": "running",
                            "tool_call_id": tool_call_id, "elapsed_ms": 0})
+        self.record({"type": "tool_start", "name": name, "args": args,
+                     "tool_call_id": tool_call_id})
         if not isinstance(args, dict):
             result = _fail("工具参数格式错误，请重新调用", error_code="bad_arguments")
         elif _tool_forbidden(forced, name, user_text):
@@ -821,11 +835,12 @@ class Agent:
                     result = _fail(str(e)[:200], error_code="tool_exception")
         result = _normalize_result(result)
         elapsed = int((time.monotonic() - started) * 1000)
-        self.emit("tool_done", {"name": name, "args": args,
-                                "status": "ok" if result["success"] else "error",
-                                "tool_call_id": tool_call_id, "elapsed_ms": elapsed,
-                                "error_code": result["error_code"],
-                                "retryable": result["retryable"]})
+        done = {"name": name, "args": args,
+                "status": "ok" if result["success"] else "error",
+                "tool_call_id": tool_call_id, "elapsed_ms": elapsed,
+                "error_code": result["error_code"], "retryable": result["retryable"]}
+        self.emit("tool_done", done)
+        self.record({"type": "tool_done", "payload": done})
         return result
 
     @staticmethod
@@ -835,14 +850,18 @@ class Agent:
 
     def chat(self, user_text):
         """处理一条用户消息。在后台线程调用，通过 emit 推送过程。"""
+        # 用户消息和工具调用入口由 Api._job_worker 记录；这里只记 Agent 产生的展示记录。
         if not self.configured():
             self.emit("msg", "未配置 API key。请到设置页填写智谱 key（glm-4-flash 免费）。")
+            self.record({"type": "msg", "text": "未配置 API key。请到设置页填写智谱 key（glm-4-flash 免费）。"})
             return
         self._refresh_client()
         forced = _forced_platform(user_text)
         intent = parse_intent(user_text, self.history)
         if intent["action"] == "search_download" and not intent["keyword"]:
-            self.emit("msg", "我可以帮你搜索下载，但还缺一个主题关键词（比如“信息科技”“搞笑”“唱歌”）。你告诉我关键词后我直接搜。")
+            text = "我可以帮你搜索下载，但还缺一个主题关键词（比如“信息科技”“搞笑”“唱歌”）。你告诉我关键词后我直接搜。"
+            self.emit("msg", text)
+            self.record({"type": "msg", "text": text})
             return
         messages = [
             {"role": "system", "content": SYSTEM},
@@ -865,6 +884,7 @@ class Agent:
                 if not retried and self._retryable_api_error(e):
                     retried = True
                     self.emit("status", "模型请求失败，正在重试；不要重复道歉，直接继续未完成任务")
+                    self.record({"type": "msg", "text": "模型请求失败，正在重试…"})
                     continue
                 code = getattr(e, "status_code", None)
                 if code == 401:
@@ -876,6 +896,7 @@ class Agent:
                 else:
                     hint = f"调用模型失败：{str(e)[:160]}"
                 self.emit("msg", hint)
+                self.record({"type": "msg", "text": hint})
                 break
             retried = False
             choice = resp.choices[0]
@@ -883,6 +904,7 @@ class Agent:
 
             if msg.content:
                 self.emit("msg", msg.content)
+                self.record({"type": "msg", "text": msg.content})
 
             if not msg.tool_calls:
                 break  # 模型认为任务完成
@@ -899,13 +921,17 @@ class Agent:
                 except Exception:
                     args = None
                 result = self._execute_tool(name, args, forced, tool_call_id, user_text)
-                self.emit("result", {**result, "name": name, "tool_call_id": tool_call_id})
+                result_event = {**result, "name": name, "tool_call_id": tool_call_id}
+                self.emit("result", result_event)
+                self.record({"type": "result", "payload": result_event})
                 messages.append({
                     "role": "tool", "tool_call_id": tool_call_id,
                     "content": _result_str(result),
                 })
         else:
-            self.emit("msg", "（已执行多轮工具调用，如有未完成请再说一次）")
+            hint = "（已执行多轮工具调用，如有未完成请再说一次）"
+            self.emit("msg", hint)
+            self.record({"type": "msg", "text": hint})
 
         self.history = _clip_history(messages[2:])
         conversation_store.save(self.conversation_id, self.history,

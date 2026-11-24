@@ -42,43 +42,54 @@ function scrollChat() {
   log.scrollTop = log.scrollHeight;
 }
 
-// ---- 对话显示缓存（服务端会话为准；localStorage 只做当前显示恢复）----
-const HISTORY_KEY = 'downloader_chat_history';
-const HISTORY_MAX = 200;
+// ---- 对话记录：服务端会话流水为唯一来源 ----
+// 每条 record 都是一次对话动作，切换/刷新会话时由服务端记录回放。
 let currentConversationId = null;
 
-function saveHistory() {
-  try {
-    const msgs = Array.from($('chatLog').querySelectorAll('.msg'))
-      .filter((n) => !n.classList.contains('thinking'))
-      .slice(-HISTORY_MAX)
-      .map((n) => ({ html: n.outerHTML }));
-    localStorage.setItem(HISTORY_KEY + ':' + (currentConversationId || 'default'), JSON.stringify(msgs));
-  } catch (e) { /* 隐私模式或空间不足时静默跳过 */ }
+function saveHistory() { /* 兼容旧调用：记录已由服务端维护 */ }
+
+function applyRecords(records) {
+  if (!Array.isArray(records)) return false;
+  const log = $('chatLog');
+  log.innerHTML = '';
+  // 先恢复基础对话，选择卡和搜索卡在真实点击后仍可重新操作。
+  records.forEach((rec) => renderRecord(rec, log));
+  scrollChat();
+  return records.length > 0;
 }
 
-function restoreHistory(cid) {
-  try {
-    const raw = localStorage.getItem(HISTORY_KEY + ':' + (cid || currentConversationId || 'default'));
-    if (!raw) return false;
-    const msgs = JSON.parse(raw);
-    if (!Array.isArray(msgs) || !msgs.length) return false;
-    const log = $('chatLog');
-    log.innerHTML = '';
-    msgs.forEach((m) => {
-      const div = document.createElement('div');
-      div.innerHTML = m.html;
-      if (div.firstChild) log.appendChild(div.firstChild);
-    });
-    scrollChat();
-    return true;
-  } catch (e) { return false; }
+function renderRecord(rec, log) {
+  if (!rec || !log) return;
+  const t = rec.type;
+  if (t === 'html') {
+    const wrap = document.createElement('div');
+    wrap.innerHTML = String(rec.html || '');
+    const card = wrap.firstElementChild;
+    if (card) log.appendChild(card);
+  } else if (t === 'user') addMessage(rec.text || '', 'user');
+  else if (t === 'msg' || t === 'status') addMessage(rec.text || '', 'agent');
+  else if (t === 'tool_start') addToolStatus(rec.name || '', rec.args || {});
+  else if (t === 'tool_done') {
+    const d = rec.payload || {};
+    const card = findToolCard(d.tool_call_id, true);
+    if (card) {
+      const done = d.status === 'ok' || d.status === 'error';
+      if (done) card.dataset.toolDone = d.status;
+      setToolCardState(card, d.status === 'ok' ? 'ok' : 'fail',
+        (d.status === 'ok' ? '完成' : d.status === 'error' ? '失败' : d.status) +
+        (d.elapsed_ms ? ' · ' + d.elapsed_ms + 'ms' : ''));
+    }
+  } else if (t === 'result') {
+    markToolStatus(rec.payload || {});
+    addResult(rec.payload || {});
+  } else if (t === 'plan') planCard(rec.steps || []);
+  else if (t === 'ask_choice') showChoice(rec.payload || {});
+  else if (t === 'organize_preview') organizeCard(rec.payload || {});
+  else if (t === 'search_results') searchResultsCard(rec.payload || {});
 }
 
 function clearHistory() {
-  try { localStorage.removeItem(HISTORY_KEY + ':' + (currentConversationId || 'default')); } catch (e) {}
   $('chatLog').innerHTML = '';
-  saveHistory();
 }
 
 async function refreshConversations(preferredId) {
@@ -90,7 +101,7 @@ async function refreshConversations(preferredId) {
     currentConversationId = preferredId || (r && r.current) || (items[0] && items[0].id) || null;
     select.innerHTML = items.length
       ? items.map((c) => '<option value="' + escapeHtml(c.id) + '">' +
-          escapeHtml(c.title || '未命名对话') + '（' + (c.messages || 0) + '）</option>').join('')
+          escapeHtml(c.title || '新对话') + '</option>').join('')
       : '<option value="">新对话</option>';
     if (currentConversationId) select.value = currentConversationId;
   } catch (e) { console.error('会话列表加载失败', e); }
@@ -102,7 +113,6 @@ async function newConversation() {
     currentConversationId = r.id;
     clearHistory();
     await refreshConversations(r.id);
-    addMessage('已开启新对话。', 'agent');
   } catch (e) { addResult({ success: false, message: friendlyError(e), detail: String(e) }); }
 }
 
@@ -112,7 +122,7 @@ async function switchConversation(cid) {
     const r = await api.switch_conversation(cid);
     currentConversationId = r.id;
     clearHistory();
-    restoreHistory(r.id);
+    applyRecords(r && r.records);
     await refreshConversations(r.id);
   } catch (e) { addResult({ success: false, message: friendlyError(e), detail: String(e) }); }
 }
@@ -124,12 +134,13 @@ async function deleteConversation() {
   try {
     const r = await api.delete_conversation(cid);
     if (!r || !r.ok) throw new Error((r && r.message) || '删除失败');
-    try { localStorage.removeItem(HISTORY_KEY + ':' + cid); } catch (e) {}
     await refreshConversations();
     if (!currentConversationId) await newConversation();
     else {
+      const r2 = await api.switch_conversation(currentConversationId);
       clearHistory();
-      restoreHistory(currentConversationId);
+      applyRecords(r2 && r2.records);
+      await refreshConversations(currentConversationId);
     }
   } catch (e) { addResult({ success: false, message: friendlyError(e), detail: String(e) }); }
 }
@@ -336,10 +347,10 @@ function addToolStatus(name, args) {
   saveHistory();
 }
 
-function findToolCard(id) {
+function findToolCard(id, includeDone = false) {
   if (!id) return null;
-  return Array.from($('chatLog').querySelectorAll('.tool-card[data-tool-name]'))
-    .find((n) => n.dataset.toolCallId === id && !n.dataset.toolDone) || null;
+  const cards = Array.from($('chatLog').querySelectorAll('.tool-card[data-tool-name]'));
+  return cards.find((n) => n.dataset.toolCallId === id && (includeDone || !n.dataset.toolDone)) || null;
 }
 
 function setToolCardState(card, cls, text) {
@@ -370,8 +381,8 @@ function markToolStatus(result) {
   setToolCardState(card, ok ? 'ok' : 'fail', ok ? '完成' : '失败');
   if (!ok) {
     const argsBox = card.querySelector('.tool-card-args');
-    const detail = result && (result.detail || result.message);
-    if (detail) {
+    const detail = result && ((result.detail ? result.detail + ' ' : '') + (result.message || ''));
+    if (detail.trim()) {
       const err = document.createElement('div');
       err.className = 'tool-card-error';
       err.textContent = String(detail);
@@ -393,7 +404,7 @@ function addResult(result) {
   const cls = result.success ? 'ok' : 'fail';
   const text = result.success
     ? ('✓ ' + (result.message || ''))
-    : ('✗ ' + friendlyError(result.detail || result.message));
+    : ('✗ ' + (result.message ? String(result.message) : friendlyError(result.detail)));
   const retry = (!result.success && lastToolCall)
     ? '<button class="text-btn retry-btn" data-retry>重试</button>' : '';
   div.innerHTML =
@@ -491,6 +502,9 @@ async function poll() {
     const events = await api.poll();
     events.forEach((ev) => {
       switch (ev.event) {
+        case 'record':
+          // 记录用于会话回放；实时展示仍由 msg/tool/result 等事件负责。
+          break;
         case 'job_start':
           runningJobId = ev.data && ev.data.id;
           break;
@@ -508,7 +522,7 @@ async function poll() {
           break;
         case 'tool_done':
           if (ev.data && ev.data.tool_call_id) {
-            const doneCard = findToolCard(ev.data.tool_call_id);
+            const doneCard = findToolCard(ev.data.tool_call_id, true);
             if (doneCard) {
               const done = ev.data.status === 'ok' || ev.data.status === 'error';
               if (done) doneCard.dataset.toolDone = ev.data.status;
@@ -1120,7 +1134,10 @@ onReady(async () => {
     catch (e) { $('assetFooter').textContent = '复制失败：' + friendlyError(e); }
   });
   $('assetDeleteSelected').addEventListener('click', () => deleteAssets(selectedAssets()));
-  refreshConversations();
+  (async () => {
+    await refreshConversations();
+    if (currentConversationId) await switchConversation(currentConversationId);
+  })();
   $('clearChatBtn').addEventListener('click', clearHistory);
   $('newConversationBtn').addEventListener('click', newConversation);
   $('deleteConversationBtn').addEventListener('click', deleteConversation);
